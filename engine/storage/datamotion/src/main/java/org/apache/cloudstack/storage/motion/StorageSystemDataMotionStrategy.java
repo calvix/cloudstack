@@ -105,9 +105,11 @@ import com.cloud.configuration.Config;
 import com.cloud.dc.dao.ClusterDao;
 import com.cloud.exception.AgentUnavailableException;
 import com.cloud.exception.OperationTimedoutException;
+import com.cloud.host.DetailVO;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.resource.ResourceState;
 import com.cloud.storage.DataStoreRole;
@@ -178,6 +180,8 @@ public class StorageSystemDataMotionStrategy implements DataMotionStrategy {
     private ClusterDao clusterDao;
     @Inject
     private HostDao _hostDao;
+    @Inject
+    private HostDetailsDao _hostDetailsDao;
     @Inject
     protected PrimaryDataStoreDao _storagePoolDao;
     @Inject
@@ -2202,6 +2206,8 @@ public class StorageSystemDataMotionStrategy implements DataMotionStrategy {
             boolean kvmAutoConvergence = StorageManager.KvmAutoConvergence.value();
             migrateCommand.setAutoConvergence(kvmAutoConvergence);
 
+            migrateCommand.setMigrateTls(shouldMigrateWithTls(srcHost, destHost));
+
             MigrateAnswer migrateAnswer = null;
             try {
                 migrateAnswer = (MigrateAnswer)agentManager.send(srcHost.getId(), migrateCommand);
@@ -2347,6 +2353,36 @@ public class StorageSystemDataMotionStrategy implements DataMotionStrategy {
      */
     protected boolean shouldMigrateVolume(StoragePoolVO sourceStoragePool, Host destHost, StoragePoolVO destStoragePool) {
         return true;
+    }
+
+    /**
+     * Decides whether the KVM live-migration-with-volumes data stream should be encrypted with QEMU-native TLS.
+     * This path carries both guest memory and disk contents on the wire. TLS is used only when the
+     * {@code kvm.migrate.tls} setting is enabled for the destination zone AND both the source and destination
+     * hosts advertise {@code host.migrate.tls} support; otherwise it silently falls back to the plaintext stream,
+     * keeping mixed / partially-upgraded fleets migrating without failures.
+     */
+    protected boolean shouldMigrateWithTls(Host srcHost, Host destHost) {
+        if (srcHost == null || destHost == null) {
+            return false;
+        }
+        if (!StorageManager.KvmMigrateTls.valueIn(destHost.getDataCenterId())) {
+            return false;
+        }
+
+        final boolean srcSupportsTls = hostAdvertisesMigrateTls(srcHost.getId());
+        final boolean destSupportsTls = hostAdvertisesMigrateTls(destHost.getId());
+        if (!srcSupportsTls || !destSupportsTls) {
+            logger.debug("kvm.migrate.tls is enabled but not both hosts advertise migration-TLS support (source [{}]={}, destination [{}]={}); " +
+                    "falling back to the plaintext migration data stream.", srcHost.getId(), srcSupportsTls, destHost.getId(), destSupportsTls);
+            return false;
+        }
+        return true;
+    }
+
+    private boolean hostAdvertisesMigrateTls(Long hostId) {
+        final DetailVO detail = _hostDetailsDao.findDetail(hostId, Host.HOST_MIGRATE_TLS);
+        return detail != null && Boolean.parseBoolean(detail.getValue());
     }
 
     /**

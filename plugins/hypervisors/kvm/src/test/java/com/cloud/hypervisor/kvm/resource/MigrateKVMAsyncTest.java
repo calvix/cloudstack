@@ -45,7 +45,7 @@ public class MigrateKVMAsyncTest {
     @Test
     public void createTypedParameterListTestNoMigrateDiskLabels() {
         MigrateKVMAsync migrateKVMAsync = new MigrateKVMAsync(libvirtComputingResource, domain, connect, "testxml",
-                false, false, false, "tst", "1.1.1.1", null);
+                false, false, false, "tst", "1.1.1.1", null, false);
 
         Mockito.doReturn(10).when(libvirtComputingResource).getMigrateSpeed();
 
@@ -61,10 +61,29 @@ public class MigrateKVMAsyncTest {
     }
 
     @Test
+    public void createTypedParameterListTestWithMigrateTlsKeepsTcpUri() {
+        // TLS is enabled solely via the VIR_MIGRATE_TLS flag; the data URI must stay "tcp:"
+        // because libvirt has no "tls:" migration URI scheme. Guards against reintroducing it.
+        MigrateKVMAsync migrateKVMAsync = new MigrateKVMAsync(libvirtComputingResource, domain, connect, "testxml",
+                false, false, false, "tst", "1.1.1.1", null, true);
+
+        Mockito.doReturn(10).when(libvirtComputingResource).getMigrateSpeed();
+
+        TypedParameter[] result = migrateKVMAsync.createTypedParameterList();
+
+        Assert.assertEquals(4, result.length);
+
+        Assert.assertEquals("tst", result[0].getValueAsString());
+        Assert.assertEquals("testxml", result[1].getValueAsString());
+        Assert.assertEquals("tcp:1.1.1.1", result[2].getValueAsString());
+        Assert.assertEquals("10", result[3].getValueAsString());
+    }
+
+    @Test
     public void createTypedParameterListTestWithMigrateDiskLabels() {
         Set<String> labels = Set.of("vda", "vdb");
         MigrateKVMAsync migrateKVMAsync = new MigrateKVMAsync(libvirtComputingResource, domain, connect, "testxml",
-                false, false, false, "tst", "1.1.1.1", labels);
+                false, false, false, "tst", "1.1.1.1", labels, false);
 
         Mockito.doReturn(10).when(libvirtComputingResource).getMigrateSpeed();
 

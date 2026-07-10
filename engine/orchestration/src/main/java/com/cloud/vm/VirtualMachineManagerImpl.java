@@ -217,6 +217,7 @@ import com.cloud.exception.StorageAccessException;
 import com.cloud.exception.StorageUnavailableException;
 import com.cloud.ha.HighAvailabilityManager;
 import com.cloud.ha.HighAvailabilityManager.WorkType;
+import com.cloud.host.DetailVO;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
 import com.cloud.host.Status;
@@ -3383,6 +3384,8 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         migrateCommand.setAutoConvergence(StorageManager.KvmAutoConvergence.value());
         migrateCommand.setHostGuid(destination.getHost().getGuid());
 
+        migrateCommand.setMigrateTls(shouldMigrateWithTls(vmInstance, destination));
+
         PrepareForMigrationAnswer prepareForMigrationAnswer = (PrepareForMigrationAnswer) answer;
 
         Map<String, DpdkTO> answerDpdkInterfaceMapping = prepareForMigrationAnswer.getDpdkInterfaceMapping();
@@ -3400,6 +3403,40 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         }
 
         return migrateCommand;
+    }
+
+    /**
+     * Decides whether the KVM live-migration data stream should be encrypted with QEMU-native TLS.
+     * TLS is used only when the {@code kvm.migrate.tls} setting is enabled for the destination zone
+     * AND both the source and destination hosts advertise {@code host.migrate.tls} support. If any of
+     * these conditions is not met the migration silently falls back to the plaintext {@code tcp:} stream,
+     * which keeps mixed / partially-upgraded fleets migrating without failures.
+     */
+    protected boolean shouldMigrateWithTls(VMInstanceVO vmInstance, DeployDestination destination) {
+        final Long zoneId = destination.getHost().getDataCenterId();
+        if (!StorageManager.KvmMigrateTls.valueIn(zoneId)) {
+            return false;
+        }
+
+        final Long srcHostId = vmInstance.getHostId() != null ? vmInstance.getHostId() : vmInstance.getLastHostId();
+        final Long destHostId = destination.getHost().getId();
+        final boolean srcSupportsTls = srcHostId != null && hostAdvertisesMigrateTls(srcHostId);
+        final boolean destSupportsTls = destHostId != null && hostAdvertisesMigrateTls(destHostId);
+
+        if (!srcSupportsTls || !destSupportsTls) {
+            logger.debug("kvm.migrate.tls is enabled but not both hosts advertise migration-TLS support (source [{}]={}, destination [{}]={}) for VM [{}]; " +
+                    "falling back to the plaintext migration data stream.", srcHostId, srcSupportsTls, destHostId, destSupportsTls, vmInstance.getInstanceName());
+            return false;
+        }
+
+        logger.debug("Enabling QEMU-native TLS for the migration data stream of VM [{}] (source host [{}], destination host [{}]).",
+                vmInstance.getInstanceName(), srcHostId, destHostId);
+        return true;
+    }
+
+    private boolean hostAdvertisesMigrateTls(Long hostId) {
+        final DetailVO detail = hostDetailsDao.findDetail(hostId, Host.HOST_MIGRATE_TLS);
+        return detail != null && Boolean.parseBoolean(detail.getValue());
     }
 
     private void updateVmPod(VMInstanceVO vm, long dstHostId) {

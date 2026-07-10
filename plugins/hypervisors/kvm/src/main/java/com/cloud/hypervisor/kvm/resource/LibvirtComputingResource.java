@@ -18,6 +18,7 @@ package com.cloud.hypervisor.kvm.resource;
 
 import static com.cloud.host.Host.HOST_CDROM_MAX_COUNT;
 import static com.cloud.host.Host.HOST_INSTANCE_CONVERSION;
+import static com.cloud.host.Host.HOST_MIGRATE_TLS;
 import static com.cloud.host.Host.HOST_OVFTOOL_VERSION;
 import static com.cloud.host.Host.HOST_VDDK_LIB_DIR;
 import static com.cloud.host.Host.HOST_VDDK_SUPPORT;
@@ -4410,6 +4411,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         cmd.setGatewayIpAddress(localGateway);
         cmd.setIqn(getIqn());
         cmd.getHostDetails().put(HOST_VOLUME_ENCRYPTION, String.valueOf(hostSupportsVolumeEncryption()));
+        cmd.getHostDetails().put(HOST_MIGRATE_TLS, String.valueOf(hostSupportsMigrateTls()));
         cmd.setHostTags(getHostTags());
         boolean instanceConversionSupported = hostSupportsInstanceConversion();
         cmd.getHostDetails().put(HOST_INSTANCE_CONVERSION, String.valueOf(instanceConversionSupported));
@@ -6218,6 +6220,42 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         }
 
         return true;
+    }
+
+    protected static final String QEMU_MIGRATE_TLS_CONF_FILE = "/etc/libvirt/qemu.conf";
+    protected static final String QEMU_MIGRATE_TLS_CERT_DIR = "/etc/pki/qemu";
+
+    /**
+     * Determines whether this host can encrypt the live-migration data stream with QEMU-native TLS.
+     * Both conditions provisioned by the CA framework (keystore-cert-import + configure_libvirt_tls)
+     * must hold: the QEMU migration certificates exist under {@link #QEMU_MIGRATE_TLS_CERT_DIR} and
+     * qemu.conf points migration TLS at that directory via {@code migrate_tls_x509_cert_dir}. The
+     * result is advertised to the management server as the {@code host.migrate.tls} host detail.
+     */
+    public boolean hostSupportsMigrateTls() {
+        final File certDir = new File(QEMU_MIGRATE_TLS_CERT_DIR);
+        final File serverCert = new File(certDir, "server-cert.pem");
+        final File serverKey = new File(certDir, "server-key.pem");
+        final File caCert = new File(certDir, "ca-cert.pem");
+        if (!serverCert.exists() || !serverKey.exists() || !caCert.exists()) {
+            return false;
+        }
+
+        final File qemuConf = new File(QEMU_MIGRATE_TLS_CONF_FILE);
+        if (!qemuConf.exists()) {
+            return false;
+        }
+        try {
+            for (final String line : Files.readAllLines(qemuConf.toPath())) {
+                final String normalized = line.trim();
+                if (!normalized.startsWith("#") && normalized.replaceAll("\\s", "").startsWith("migrate_tls_x509_cert_dir=")) {
+                    return true;
+                }
+            }
+        } catch (final IOException e) {
+            LOGGER.warn("Unable to read {} to determine migration-TLS support", QEMU_MIGRATE_TLS_CONF_FILE, e);
+        }
+        return false;
     }
 
     public boolean isSecureMode(String bootMode) {

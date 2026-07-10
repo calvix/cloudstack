@@ -598,6 +598,10 @@ def configure_libvirt_tls(tls_enabled=False, cfo=None):
         cfo.addEntry("vnc_tls", "1")
         cfo.addEntry("vnc_tls_x509_verify", "1")
         cfo.addEntry("vnc_tls_x509_cert_dir", "\"/etc/pki/libvirt-vnc\"")
+        # QEMU native-TLS for the live-migration data stream (VIR_MIGRATE_TLS).
+        # Reuses the CA-framework certificates provisioned under /etc/pki/qemu.
+        cfo.addEntry("migrate_tls_x509_cert_dir", "\"/etc/pki/qemu\"")
+        cfo.addEntry("migrate_tls_x509_verify", "1")
     else:
         cfo.addEntry("vnc_tls", "0")
 
