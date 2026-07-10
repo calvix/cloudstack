@@ -44,6 +44,7 @@ public class MigrateKVMAsync implements Callable<Domain> {
     private boolean migrateStorage;
     private boolean migrateNonSharedInc;
     private boolean autoConvergence;
+    private boolean migrateTls;
 
     protected Set<String> migrateDiskLabels;
 
@@ -90,6 +91,13 @@ public class MigrateKVMAsync implements Callable<Domain> {
     // to tune the algorithm.
     private static final long VIR_MIGRATE_AUTO_CONVERGE = 8192L;
 
+    // Use TLS for the native (QEMU) migration data connection. When set, QEMU encrypts
+    // the guest memory (and non-shared disk) stream using the certificates configured
+    // via qemu.conf's migrate_tls_x509_cert_dir. TLS is negotiated over the normal
+    // "tcp:" data connection - libvirt has no "tls:" migration URI scheme (valid
+    // schemes are tcp/rdma/unix/fd), so the URI is unchanged and only this flag is set.
+    private static final long VIR_MIGRATE_TLS = 65536L;
+
     // Libvirt 1.0.3 supports compression flag for migration.
     private static final int LIBVIRT_VERSION_SUPPORTS_MIGRATE_COMPRESSED = 1000003;
 
@@ -97,7 +105,8 @@ public class MigrateKVMAsync implements Callable<Domain> {
     private static final int LIBVIRT_VERSION_SUPPORTS_AUTO_CONVERGE = 1002003;
 
     public MigrateKVMAsync(final LibvirtComputingResource libvirtComputingResource, final Domain dm, final Connect dconn, final String dxml,
-            final boolean migrateStorage, final boolean migrateNonSharedInc, final boolean autoConvergence, final String vmName, final String destIp, Set<String> migrateDiskLabels) {
+            final boolean migrateStorage, final boolean migrateNonSharedInc, final boolean autoConvergence, final String vmName, final String destIp, Set<String> migrateDiskLabels,
+            final boolean migrateTls) {
         this.libvirtComputingResource = libvirtComputingResource;
 
         this.dm = dm;
@@ -109,6 +118,7 @@ public class MigrateKVMAsync implements Callable<Domain> {
         this.vmName = vmName;
         this.destIp = destIp;
         this.migrateDiskLabels = migrateDiskLabels;
+        this.migrateTls = migrateTls;
     }
 
     @Override
@@ -132,6 +142,11 @@ public class MigrateKVMAsync implements Callable<Domain> {
 
         if (autoConvergence && dconn.getLibVirVersion() >= LIBVIRT_VERSION_SUPPORTS_AUTO_CONVERGE) {
             flags |= VIR_MIGRATE_AUTO_CONVERGE;
+        }
+
+        if (migrateTls) {
+            flags |= VIR_MIGRATE_TLS;
+            logger.debug("Setting VIR_MIGRATE_TLS to encrypt the migration data stream of {}.", vmName);
         }
 
         TypedParameter [] parameters = createTypedParameterList();
