@@ -107,6 +107,16 @@ public interface StorageManager extends StorageService {
             true,
             ConfigKey.Scope.Global,
             null);
+    ConfigKey<Boolean> KvmMigrateTls = new ConfigKey<>(Boolean.class,
+            "kvm.migrate.tls",
+            "Storage",
+            "false",
+            "Setting this to 'true' encrypts the KVM live-migration data stream (guest memory and non-shared disk) with QEMU-native TLS (VIR_MIGRATE_TLS), " +
+            "provided both the source and destination hosts are secured and advertise host.migrate.tls support. If either host does not support it, the migration " +
+            "silently falls back to the plaintext data stream. Reuses the certificates provisioned by the CA framework.",
+            true,
+            ConfigKey.Scope.Zone,
+            null);
     ConfigKey<Integer> MaxNumberOfManagedClusteredFileSystems = new ConfigKey<>(Integer.class,
             "max.number.managed.clustered.file.systems",
             "Storage",

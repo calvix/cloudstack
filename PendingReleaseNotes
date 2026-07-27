@@ -39,3 +39,22 @@ example.ver.1 > example.ver.2:
     which can now be attached to Instances. This is to prevent the Secondary
     Storage to grow to enormous sizes as Linux Distributions keep growing in
     size while a stripped down Linux should fit on a 2.88MB floppy.
+
+
+New features:
+
+  * Encrypted KVM live-migration data stream (QEMU-native TLS). CloudStack's
+    secure KVM live migration previously encrypted only the libvirt control
+    channel, leaving the guest memory (and, for storage migration, the disk)
+    stream in plaintext on the migration network. A new zone-scoped global
+    setting 'kvm.migrate.tls' (default false) makes CloudStack request
+    VIR_MIGRATE_TLS so the migration data stream is encrypted and mutually
+    authenticated, reusing the certificates already provisioned by the CA
+    framework (a new /etc/pki/qemu cert set is created by the agent alongside
+    the existing libvirt and VNC ones). TLS is used only when both the source
+    and destination hosts are secured and advertise the 'host.migrate.tls'
+    capability; otherwise the migration transparently falls back to the
+    plaintext stream, so mixed/partially-upgraded fleets keep migrating. To
+    enable it, upgrade the agents fleet-wide, re-provision host certificates
+    (addHost does this automatically; existing hosts via "Deploy Host Keys"),
+    then set 'kvm.migrate.tls=true' for the zone.
