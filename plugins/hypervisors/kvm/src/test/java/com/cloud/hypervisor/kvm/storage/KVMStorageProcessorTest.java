@@ -688,4 +688,28 @@ public class KVMStorageProcessorTest {
         // version is not even consulted for them.
         storageProcessor.ensureLibvirtSupportsEncryptedRbdHotplug(StoragePoolType.NetworkFilesystem);
     }
+
+    @Test
+    public void attemptFreezeGuestFilesystemsReturnsTrueWhenGuestAgentResponds() throws LibvirtException {
+        Domain vm = Mockito.mock(Domain.class);
+        Mockito.when(vm.qemuAgentCommand(Mockito.anyString(), Mockito.anyInt(), Mockito.anyInt())).thenReturn("{\"return\":2}");
+        Assert.assertTrue(storageProcessor.attemptFreezeGuestFilesystems(vm, "vol-uuid"));
+    }
+
+    @Test
+    public void attemptFreezeGuestFilesystemsReturnsFalseWhenGuestAgentUnavailable() throws LibvirtException {
+        // No guest agent / freeze failure -> best-effort freeze returns false so the caller falls back to a
+        // crash-consistent snapshot instead of failing the operation.
+        Domain vm = Mockito.mock(Domain.class);
+        Mockito.when(vm.qemuAgentCommand(Mockito.anyString(), Mockito.anyInt(), Mockito.anyInt())).thenThrow(new RuntimeException("no guest agent"));
+        Assert.assertFalse(storageProcessor.attemptFreezeGuestFilesystems(vm, "vol-uuid"));
+    }
+
+    @Test
+    public void thawGuestFilesystemsSwallowsGuestAgentFailure() throws LibvirtException {
+        // A thaw failure must never propagate (the snapshot already succeeded) - it is only logged.
+        Domain vm = Mockito.mock(Domain.class);
+        Mockito.when(vm.qemuAgentCommand(Mockito.anyString(), Mockito.anyInt(), Mockito.anyInt())).thenThrow(new RuntimeException("thaw boom"));
+        storageProcessor.thawGuestFilesystems(vm, "vol-uuid"); // must not throw
+    }
 }
