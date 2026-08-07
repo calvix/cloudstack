@@ -64,3 +64,12 @@ example.ver.1 > example.ver.2:
     enable it, upgrade the agents fleet-wide, re-provision host certificates
     (addHost does this automatically; existing hosts via "Deploy Host Keys"),
     then set 'kvm.migrate.tls=true' for the zone.
+  * KVM/Ceph: encrypted RBD volumes can now be snapshotted while the Instance
+    is running, as long as the snapshot is kept on primary storage
+    (snapshot.backup.to.secondary=false). CloudStack takes a native,
+    encryption-transparent librbd snapshot of the live image; when the qemu
+    guest agent is available the guest filesystems are frozen for an
+    application-consistent snapshot, otherwise a crash-consistent snapshot is
+    taken. Other encrypted volumes (qemu-native LUKS, or snapshots backed up to
+    secondary storage) still require the Instance to be stopped before
+    snapshotting.

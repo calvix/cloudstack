@@ -90,6 +90,7 @@ import org.apache.cloudstack.storage.to.SnapshotObjectTO;
 import org.apache.cloudstack.storage.to.TemplateObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.apache.cloudstack.utils.cryptsetup.KeyFile;
+import org.apache.cloudstack.utils.qemu.QemuCommand;
 import org.apache.cloudstack.utils.qemu.QemuImageOptions;
 import org.apache.cloudstack.utils.qemu.QemuImg;
 import org.apache.cloudstack.utils.qemu.QemuImg.PhysicalDiskFormat;
@@ -2082,8 +2083,15 @@ public class KVMStorageProcessor implements StorageProcessor {
                 }
             }
 
-            if (DomainInfo.DomainState.VIR_DOMAIN_RUNNING.equals(state) && volume.requiresEncryption()) {
-                throw new CloudRuntimeException("VM is running, encrypted volume snapshots aren't supported");
+            // Encrypted volumes cannot be snapshotted through the qemu external-snapshot path used for running VMs.
+            // For Ceph/RBD kept on primary storage (snapshot.backup.to.secondary=false) we can still snapshot online by
+            // taking a native, encryption-transparent 'rbd snap create' on the live image (handled below); every other
+            // encrypted case still requires the VM to be stopped.
+            boolean runningEncrypted = DomainInfo.DomainState.VIR_DOMAIN_RUNNING.equals(state) && volume.requiresEncryption();
+            boolean onlineEncryptedRbd = runningEncrypted && primaryStore.getPoolType() == StoragePoolType.RBD && imageStoreTo == null;
+            if (runningEncrypted && !onlineEncryptedRbd) {
+                throw new CloudRuntimeException("VM is running: online snapshots of encrypted volumes are only supported for RBD kept on " +
+                        "primary storage (set snapshot.backup.to.secondary=false); otherwise stop the VM before snapshotting");
             }
 
             KVMStoragePool primaryPool = storagePoolMgr.getStoragePool(primaryStore.getPoolType(), primaryStore.getUuid());
@@ -2094,7 +2102,13 @@ public class KVMStorageProcessor implements StorageProcessor {
             String diskPath = disk.getPath();
             String snapshotPath = diskPath + File.separator + snapshotName;
             SnapshotObjectTO newSnapshot = new SnapshotObjectTO();
-            if (DomainInfo.DomainState.VIR_DOMAIN_RUNNING.equals(state) && !primaryPool.isExternalSnapshot()) {
+            if (onlineEncryptedRbd) {
+                Long snapshotSize = takeRbdVolumeSnapshotOfRunningVm(primaryPool, disk, snapshotName, vm);
+                newSnapshot.setPath(snapshotPath);
+                if (snapshotSize != null) {
+                    newSnapshot.setPhysicalSize(snapshotSize);
+                }
+            } else if (DomainInfo.DomainState.VIR_DOMAIN_RUNNING.equals(state) && !primaryPool.isExternalSnapshot()) {
                 if (snapshotTO.isKvmIncrementalSnapshot()) {
                     newSnapshot = takeIncrementalVolumeSnapshotOfRunningVm(snapshotTO, primaryPool, secondaryPool, imageStoreTo != null ? imageStoreTo.getUrl() : null, snapshotName, volume, vm, conn, cmd.getWait());
                 } else {
@@ -2619,6 +2633,57 @@ public class KVMStorageProcessor implements StorageProcessor {
             destroyRadosIoCtx(r, io, disk.getName());
         }
         return snapshotSize;
+    }
+
+    private static final int QEMU_GUEST_AGENT_TIMEOUT_SECONDS = 10;
+
+    /**
+     * Take a snapshot of a <em>running</em> VM's encrypted RBD volume using a native, encryption-transparent
+     * librbd snapshot ({@code rbd snap create}). librbd snapshots operate on the raw image at the Ceph layer,
+     * so they work on a live, exclusive-locked image and need no passphrase. For an application-consistent
+     * snapshot the guest filesystems are frozen via the qemu guest agent when it is available; otherwise a
+     * crash-consistent snapshot is taken. The guest is always thawed afterwards.
+     */
+    protected Long takeRbdVolumeSnapshotOfRunningVm(KVMStoragePool primaryPool, KVMPhysicalDisk disk, String snapshotName, Domain vm) {
+        boolean frozen = attemptFreezeGuestFilesystems(vm, disk.getName());
+        try {
+            return takeRbdVolumeSnapshotOfStoppedVm(primaryPool, disk, snapshotName);
+        } finally {
+            if (frozen) {
+                thawGuestFilesystems(vm, disk.getName());
+            }
+        }
+    }
+
+    /**
+     * Best-effort guest filesystem freeze for an application-consistent snapshot. Returns {@code true} if the
+     * guest was frozen (the caller must then thaw it), {@code false} if the guest agent is unavailable or the
+     * freeze failed - in which case the caller proceeds with a crash-consistent snapshot.
+     */
+    protected boolean attemptFreezeGuestFilesystems(Domain vm, String diskName) {
+        try {
+            String result = vm.qemuAgentCommand(QemuCommand.buildQemuCommand(QemuCommand.AGENT_FREEZE, null), QEMU_GUEST_AGENT_TIMEOUT_SECONDS, 0);
+            logger.info("Froze guest filesystems for an application-consistent snapshot of [{}]; guest-fsfreeze-freeze returned [{}].", diskName, result);
+            return true;
+        } catch (Exception e) {
+            logger.warn("Could not freeze guest filesystems before snapshotting [{}] (guest agent unavailable or freeze failed); " +
+                    "proceeding with a crash-consistent snapshot. Reason: {}", diskName, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Thaw the guest filesystems after a frozen snapshot. A guest left frozen would block all guest I/O, so a
+     * failure here is logged as an error but never propagated (the snapshot itself already succeeded).
+     */
+    protected void thawGuestFilesystems(Domain vm, String diskName) {
+        try {
+            String result = vm.qemuAgentCommand(QemuCommand.buildQemuCommand(QemuCommand.AGENT_THAW, null), QEMU_GUEST_AGENT_TIMEOUT_SECONDS, 0);
+            logger.info("Thawed guest filesystems after snapshotting [{}]; guest-fsfreeze-thaw returned [{}].", diskName, result);
+        } catch (Exception e) {
+            logger.error("CRITICAL: failed to thaw guest filesystems after snapshotting [{}]; guest I/O may remain blocked until the " +
+                    "guest is thawed or restarted. Reason: {}", diskName, e.getMessage(), e);
+        }
     }
 
     protected long getRbdSnapshotSize(String poolPath, String diskName, String snapshotName, String rbdMonitor, String authUser, String authSecret) {
