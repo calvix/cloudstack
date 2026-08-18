@@ -567,4 +567,117 @@ public class LibvirtRestoreBackupCommandWrapperTest {
             }
         }
     }
+
+    /**
+     * An in-place restore renumbers the device ids of the data disks, so the instance's volumes and
+     * the backed up volumes do not necessarily arrive in the same order. The backup of a volume must
+     * still be written into that same volume, matched by UUID rather than by position in the list.
+     */
+    @Test
+    public void testRestoreOfExistingVmMapsBackupsToVolumesByUuid() throws Exception {
+        when(command.getVmName()).thenReturn("test-vm");
+        when(command.getBackupPath()).thenReturn("backup/path");
+        when(command.getBackupRepoAddress()).thenReturn("192.168.1.100:/backup");
+        when(command.getBackupRepoType()).thenReturn("nfs");
+        when(command.getMountOptions()).thenReturn("rw");
+        when(command.isVmExists()).thenReturn(true);
+        when(command.getDiskType()).thenReturn("root");
+        PrimaryDataStoreTO pool = Mockito.mock(PrimaryDataStoreTO.class);
+        lenient().when(pool.getPoolType()).thenReturn(Storage.StoragePoolType.NetworkFilesystem);
+        when(command.getRestoreVolumePools()).thenReturn(Arrays.asList(pool, pool, pool));
+        // the instance's volumes, ordered by their CURRENT device ids: the data disks are swapped
+        // relative to the backup, which is the state left behind by a previous restore
+        when(command.getRestoreVolumePaths()).thenReturn(Arrays.asList(
+                "/var/lib/libvirt/images/root-vol",
+                "/var/lib/libvirt/images/data-vol-b",
+                "/var/lib/libvirt/images/data-vol-a"
+        ));
+        // the backed up volumes, ordered by the device ids recorded in the backup
+        when(command.getBackupVolumesUUIDs()).thenReturn(Arrays.asList("root-vol", "data-vol-a", "data-vol-b"));
+        when(command.getBackupFiles()).thenReturn(Arrays.asList("root-vol", "data-vol-a", "data-vol-b"));
+        when(command.getMountTimeout()).thenReturn(30);
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class)) {
+            Path tempPath = Mockito.mock(Path.class);
+            when(tempPath.toString()).thenReturn("/tmp/csbackup.abc123");
+            filesMock.when(() -> Files.createTempDirectory(anyString())).thenReturn(tempPath);
+
+            try (MockedStatic<Script> scriptMock = mockStatic(Script.class)) {
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString())).thenReturn(0);
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString(), anyInt(), any(Boolean.class))).thenReturn(0);
+                filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenReturn(true);
+
+                Answer result = wrapper.execute(command, libvirtComputingResource);
+
+                Assert.assertTrue(((BackupAnswer) result).getResult());
+
+                // each backup file has to land in the volume it was taken from
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/root.root-vol.qcow2 /var/lib/libvirt/images/root-vol"),
+                        anyInt(), any(Boolean.class)));
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/datadisk.data-vol-a.qcow2 /var/lib/libvirt/images/data-vol-a"),
+                        anyInt(), any(Boolean.class)));
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/datadisk.data-vol-b.qcow2 /var/lib/libvirt/images/data-vol-b"),
+                        anyInt(), any(Boolean.class)));
+
+                // and must never be written into the other data disk
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/datadisk.data-vol-a.qcow2 /var/lib/libvirt/images/data-vol-b"),
+                        anyInt(), any(Boolean.class)), Mockito.never());
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/datadisk.data-vol-b.qcow2 /var/lib/libvirt/images/data-vol-a"),
+                        anyInt(), any(Boolean.class)), Mockito.never());
+            }
+        }
+    }
+
+    /**
+     * If a volume recorded in the backup is no longer attached to the instance there is nothing to
+     * restore it into, and the restore has to fail instead of writing it into some other volume.
+     */
+    @Test
+    public void testRestoreOfExistingVmFailsWhenBackedUpVolumeIsNoLongerAttached() throws Exception {
+        when(command.getVmName()).thenReturn("test-vm");
+        when(command.getBackupPath()).thenReturn("backup/path");
+        when(command.getBackupRepoAddress()).thenReturn("192.168.1.100:/backup");
+        when(command.getBackupRepoType()).thenReturn("nfs");
+        when(command.getMountOptions()).thenReturn("rw");
+        when(command.isVmExists()).thenReturn(true);
+        when(command.getDiskType()).thenReturn("root");
+        PrimaryDataStoreTO pool = Mockito.mock(PrimaryDataStoreTO.class);
+        lenient().when(pool.getPoolType()).thenReturn(Storage.StoragePoolType.NetworkFilesystem);
+        when(command.getRestoreVolumePools()).thenReturn(Arrays.asList(pool, pool));
+        when(command.getRestoreVolumePaths()).thenReturn(Arrays.asList(
+                "/var/lib/libvirt/images/root-vol",
+                "/var/lib/libvirt/images/data-vol-a"
+        ));
+        // the backup holds a data disk that the instance no longer has
+        when(command.getBackupVolumesUUIDs()).thenReturn(Arrays.asList("root-vol", "data-vol-z"));
+        when(command.getBackupFiles()).thenReturn(Arrays.asList("root-vol", "data-vol-z"));
+        when(command.getMountTimeout()).thenReturn(30);
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class)) {
+            Path tempPath = Mockito.mock(Path.class);
+            when(tempPath.toString()).thenReturn("/tmp/csbackup.abc123");
+            filesMock.when(() -> Files.createTempDirectory(anyString())).thenReturn(tempPath);
+
+            try (MockedStatic<Script> scriptMock = mockStatic(Script.class)) {
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString())).thenReturn(0);
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString(), anyInt(), any(Boolean.class))).thenReturn(0);
+                filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenReturn(true);
+
+                Answer result = wrapper.execute(command, libvirtComputingResource);
+
+                Assert.assertFalse(((BackupAnswer) result).getResult());
+                Assert.assertTrue(result.getDetails().contains("data-vol-z"));
+
+                // nothing may be written into the surviving data disk
+                scriptMock.verify(() -> Script.runSimpleBashScriptForExitValue(
+                        Mockito.eq("rsync -az /tmp/csbackup.abc123/backup/path/datadisk.data-vol-z.qcow2 /var/lib/libvirt/images/data-vol-a"),
+                        anyInt(), any(Boolean.class)), Mockito.never());
+            }
+        }
+    }
 }
