@@ -300,8 +300,39 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
     }
 
     private boolean checkBackupFileImage(String backupPath) {
+        // The backup of an encrypted volume is LUKS-encrypted, so qemu-img needs its passphrase to
+        // open it at all; without one the check fails and a perfectly good backup looks corrupt.
+        byte[] passphrase = anyPassphrase();
+        if (passphrase != null && passphrase.length > 0) {
+            try (KeyFile keyFile = new KeyFile(passphrase)) {
+                String command = String.format(
+                        "qemu-img check --object secret,id=%s,file=%s --image-opts driver=qcow2,file.filename=%s,encrypt.key-secret=%s",
+                        RESTORE_SECRET_ID, keyFile.toString(), backupPath, RESTORE_SECRET_ID);
+                return Script.runSimpleBashScriptForExitValue(command) == 0;
+            } catch (IOException ex) {
+                logger.error("Failed to create the key file needed to check the encrypted backup {}", backupPath, ex);
+                return false;
+            }
+        }
         int exitValue = Script.runSimpleBashScriptForExitValue(String.format("qemu-img check %s", backupPath));
         return exitValue == 0;
+    }
+
+    /**
+     * Any passphrase carried by this restore. The pre-restore image check runs per backup file rather
+     * than per volume, and every volume of a VM that has encrypted volumes is backed up with its own
+     * passphrase, so the first one is enough to tell whether a key is needed at all.
+     */
+    private byte[] anyPassphrase() {
+        if (currentVolumePassphrases == null) {
+            return null;
+        }
+        for (byte[] passphrase : currentVolumePassphrases.values()) {
+            if (passphrase != null && passphrase.length > 0) {
+                return passphrase;
+            }
+        }
+        return null;
     }
 
     private boolean checkBackupPathExists(String backupPath) {
@@ -313,9 +344,21 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
         return replaceVolumeWithBackup(storagePoolMgr, volumePool, volumePath, backupPath, timeout, false, null);
     }
 
-    /** Passphrase of the volume being restored, or null when it is not encrypted. */
+    /**
+     * Passphrase of the volume being restored, or null when it is not encrypted. The map is keyed by
+     * the bare volume path as the management server knows it, while the paths handed around here may
+     * carry a pool prefix (for example "cloudstack/&lt;uuid&gt;" for RBD), so fall back to the last
+     * path segment.
+     */
     private byte[] passphraseFor(String volumePath) {
-        return currentVolumePassphrases == null ? null : currentVolumePassphrases.get(volumePath);
+        if (currentVolumePassphrases == null || volumePath == null) {
+            return null;
+        }
+        byte[] passphrase = currentVolumePassphrases.get(volumePath);
+        if (passphrase == null && volumePath.contains("/")) {
+            passphrase = currentVolumePassphrases.get(volumePath.substring(volumePath.lastIndexOf('/') + 1));
+        }
+        return passphrase;
     }
 
     private boolean replaceVolumeWithBackup(KVMStoragePoolManager storagePoolMgr, PrimaryDataStoreTO volumePool, String volumePath, String backupPath, int timeout, boolean createTargetVolume, Long size) {
@@ -364,6 +407,9 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
             srcParams.put("file.filename", backupPath);
             srcParams.put("encrypt.key-secret", RESTORE_SECRET_ID);
             QemuImageOptions srcOpts = new QemuImageOptions(srcParams);
+            // Without this the options collapse to a bare filename and the backup's own
+            // encrypt.key-secret is dropped, so qemu cannot open it.
+            srcOpts.setImageOptsFlag(true);
 
             if (!Storage.StoragePoolType.RBD.equals(volumePool.getPoolType())) {
                 throw new CloudRuntimeException(String.format(
@@ -373,7 +419,7 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
             Map<String, String> destParams = new HashMap<>();
             destParams.put("driver", "rbd");
             destParams.put("pool", volumeStoragePool.getSourceDir());
-            destParams.put("image", volumePath);
+            destParams.put("image", volumePath.contains("/") ? volumePath.substring(volumePath.lastIndexOf('/') + 1) : volumePath);
             destParams.put("encrypt.format", QemuObject.EncryptFormat.LUKS2.toString());
             destParams.put("encrypt.key-secret", RESTORE_SECRET_ID);
             if (volumeStoragePool.getAuthUserName() != null) {
