@@ -22,6 +22,7 @@ import static org.mockito.Mockito.mock;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Map;
 import java.util.Optional;
 
 import com.cloud.vm.snapshot.dao.VMSnapshotDao;
@@ -31,6 +32,7 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -66,6 +68,8 @@ import com.google.gson.Gson;
 
 import org.apache.cloudstack.backup.dao.BackupDao;
 import org.apache.cloudstack.backup.dao.BackupDetailsDao;
+import org.apache.cloudstack.secret.PassphraseVO;
+import org.apache.cloudstack.secret.dao.PassphraseDao;
 import org.apache.cloudstack.backup.dao.BackupRepositoryDao;
 import org.apache.cloudstack.backup.dao.BackupOfferingDao;
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreManager;
@@ -125,6 +129,9 @@ public class NASBackupProviderTest {
 
     @Mock
     private ResourceLimitService resourceLimitMgr;
+
+    @Mock
+    private PassphraseDao passphraseDao;
 
     @Test
     public void testDeleteBackup() throws OperationTimedoutException, AgentUnavailableException {
@@ -238,9 +245,12 @@ public class NASBackupProviderTest {
         VolumeVO volume1 = mock(VolumeVO.class);
         Mockito.when(volume1.getState()).thenReturn(Volume.State.Ready);
         Mockito.when(volume1.getSize()).thenReturn(100L);
+        // Unencrypted volumes: nothing for the backup to encrypt.
+        Mockito.when(volume1.getPassphraseId()).thenReturn(null);
         VolumeVO volume2 = mock(VolumeVO.class);
         Mockito.when(volume2.getState()).thenReturn(Volume.State.Ready);
         Mockito.when(volume2.getSize()).thenReturn(200L);
+        Mockito.when(volume2.getPassphraseId()).thenReturn(null);
         Mockito.when(volumeDao.findByInstance(vmId)).thenReturn(List.of(volume1, volume2));
 
         BackupAnswer answer = mock(BackupAnswer.class);
@@ -1034,4 +1044,62 @@ public class NASBackupProviderTest {
         Mockito.verify(backupDao, Mockito.never()).remove(51L);
         Mockito.verify(backupDao).remove(50L);
     }
+
+    /**
+     * An encrypted volume must not reach the backup target in the clear: its passphrase has to travel
+     * on the command so the agent can make QEMU write the backup already encrypted.
+     */
+    @Test
+    public void takeBackupSendsPassphraseOfEncryptedVolume() throws AgentUnavailableException, OperationTimedoutException {
+        Long vmId = 1L;
+        Long hostId = 2L;
+        Long backupOfferingId = 3L;
+        Long passphraseId = 77L;
+        byte[] secret = "volume-passphrase".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        VMInstanceVO vm = mock(VMInstanceVO.class);
+        Mockito.when(vm.getId()).thenReturn(vmId);
+        Mockito.when(vm.getHostId()).thenReturn(hostId);
+        Mockito.when(vm.getInstanceName()).thenReturn("test-vm");
+        Mockito.when(vm.getBackupOfferingId()).thenReturn(backupOfferingId);
+        Mockito.when(vm.getState()).thenReturn(VMInstanceVO.State.Running);
+
+        BackupRepository backupRepository = mock(BackupRepository.class);
+        Mockito.when(backupRepository.getType()).thenReturn("nfs");
+        Mockito.when(backupRepository.getAddress()).thenReturn("10.0.0.1:/export");
+        Mockito.when(backupRepositoryDao.findByBackupOfferingId(backupOfferingId)).thenReturn(backupRepository);
+
+        HostVO host = mock(HostVO.class);
+        Mockito.when(host.getId()).thenReturn(hostId);
+        Mockito.when(host.getStatus()).thenReturn(Status.Up);
+        Mockito.when(host.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.KVM);
+        Mockito.when(hostDao.findById(hostId)).thenReturn(host);
+
+        VolumeVO encryptedVolume = mock(VolumeVO.class);
+        Mockito.when(encryptedVolume.getState()).thenReturn(Volume.State.Ready);
+        Mockito.when(encryptedVolume.getSize()).thenReturn(100L);
+        Mockito.when(encryptedVolume.getPassphraseId()).thenReturn(passphraseId);
+        Mockito.when(encryptedVolume.getPath()).thenReturn("volume-path-uuid");
+        Mockito.when(volumeDao.findByInstance(vmId)).thenReturn(List.of(encryptedVolume));
+
+        PassphraseVO passphrase = mock(PassphraseVO.class);
+        Mockito.when(passphrase.getPassphrase()).thenReturn(secret);
+        Mockito.when(passphraseDao.findById(passphraseId)).thenReturn(passphrase);
+
+        BackupAnswer answer = mock(BackupAnswer.class);
+        Mockito.when(answer.getResult()).thenReturn(true);
+        Mockito.when(answer.getSize()).thenReturn(100L);
+        Mockito.when(agentManager.send(anyLong(), Mockito.any(TakeBackupCommand.class))).thenReturn(answer);
+        Mockito.when(backupDao.persist(Mockito.any(BackupVO.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.when(backupDao.update(Mockito.anyLong(), Mockito.any(BackupVO.class))).thenReturn(true);
+
+        nasBackupProvider.takeBackup(vm, false);
+
+        ArgumentCaptor<TakeBackupCommand> captor = ArgumentCaptor.forClass(TakeBackupCommand.class);
+        Mockito.verify(agentManager).send(anyLong(), captor.capture());
+        Map<String, byte[]> sent = captor.getValue().getVolumePassphrases();
+        Assert.assertNotNull("the encrypted volume's passphrase must be sent to the agent", sent);
+        Assert.assertArrayEquals(secret, sent.get("volume-path-uuid"));
+    }
+
 }
