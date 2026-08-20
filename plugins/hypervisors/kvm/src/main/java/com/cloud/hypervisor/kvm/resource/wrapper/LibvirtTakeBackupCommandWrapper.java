@@ -22,6 +22,7 @@ package com.cloud.hypervisor.kvm.resource.wrapper;
 import com.amazonaws.util.CollectionUtils;
 import com.cloud.agent.api.Answer;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
+import com.cloud.hypervisor.kvm.resource.LibvirtConnection;
 import com.cloud.hypervisor.kvm.storage.KVMPhysicalDisk;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePool;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePoolManager;
@@ -33,10 +34,16 @@ import com.cloud.utils.script.Script;
 import org.apache.cloudstack.backup.BackupAnswer;
 import org.apache.cloudstack.backup.TakeBackupCommand;
 import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
+import org.apache.cloudstack.utils.cryptsetup.KeyFile;
+import org.libvirt.Connect;
+import org.libvirt.LibvirtException;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 @ResourceWrapper(handles = TakeBackupCommand.class)
@@ -51,6 +58,14 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
     // Incremental feature disabled: plain full backup with no QEMU bitmap/checkpoint and no
     // chain metadata. Matches nasbackup.sh's "legacy-full" mode (make_checkpoint=0).
     private static final String MODE_LEGACY_FULL = "legacy-full";
+
+    /**
+     * Prefix for the libvirt secret registered for a backup. It must differ from the consumer name
+     * used for the volume's own secret: {@code createLibvirtVolumeSecret} derives the secret uuid
+     * deterministically from the consumer, so reusing the volume's name would hand back the running
+     * VM's disk secret and delete it during cleanup.
+     */
+    private static final String BACKUP_SECRET_CONSUMER_PREFIX = "backup-";
 
     @Override
     public Answer execute(TakeBackupCommand command, LibvirtComputingResource libvirtComputingResource) {
@@ -86,9 +101,51 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
             }
         }
 
-        Pair<Integer, String> result = runBackupScript(libvirtComputingResource, command, vmName, backupRepoType, backupRepoAddress,
-                mountOptions, backupPath, diskPaths, command.getMode(),
-                command.getBitmapNew(), command.getBitmapParent(), command.getParentPaths(), timeout);
+        // Encrypted volumes: hand QEMU a secret so it writes the backup already LUKS-encrypted, and a
+        // key file for the qemu-img paths, which cannot consume libvirt secrets.
+        final Map<String, byte[]> passphrases = command.getVolumePassphrases();
+        final Map<String, String> secretUuids = new HashMap<>();
+        final Map<String, String> keyFilePaths = new HashMap<>();
+        final List<KeyFile> keyFiles = new ArrayList<>();
+        Connect conn = null;
+
+        Pair<Integer, String> result;
+        try {
+            if (passphrases != null && !passphrases.isEmpty()) {
+                try {
+                    conn = LibvirtConnection.getConnectionByVmName(vmName);
+                    for (Map.Entry<String, byte[]> entry : passphrases.entrySet()) {
+                        String volumePath = entry.getKey();
+                        secretUuids.put(volumePath, libvirtComputingResource.createLibvirtVolumeSecret(
+                                conn, BACKUP_SECRET_CONSUMER_PREFIX + volumePath, entry.getValue()));
+                        KeyFile keyFile = new KeyFile(entry.getValue());
+                        keyFiles.add(keyFile);
+                        keyFilePaths.put(volumePath, keyFile.toString());
+                    }
+                } catch (LibvirtException | IOException ex) {
+                    // Failing here would otherwise mean silently backing an encrypted volume up in the clear.
+                    logger.error("Failed to prepare encryption for the backup of VM {}", vmName, ex);
+                    return new BackupAnswer(command, false,
+                            String.format("Failed to prepare encryption for the backup of VM %s: %s", vmName, ex.getMessage()));
+                }
+            }
+
+            result = runBackupScript(libvirtComputingResource, command, vmName, backupRepoType, backupRepoAddress,
+                    mountOptions, backupPath, diskPaths, command.getMode(),
+                    command.getBitmapNew(), command.getBitmapParent(), command.getParentPaths(),
+                    secretUuids, keyFilePaths, timeout);
+        } finally {
+            for (KeyFile keyFile : keyFiles) {
+                // Cleanup must never mask the outcome of the backup itself.
+                try {
+                    keyFile.close();
+                } catch (IOException ex) {
+                    logger.warn("Failed to remove a temporary key file used for a backup. The error was: {}", ex.getMessage(), ex);
+                }
+            }
+            removeBackupSecrets(libvirtComputingResource, conn, secretUuids.values());
+            command.clearPassphrases();
+        }
 
         if (result.first() != 0) {
             logger.debug("Failed to take VM backup: " + result.second());
@@ -141,7 +198,8 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
     private Pair<Integer, String> runBackupScript(LibvirtComputingResource libvirtComputingResource,
             TakeBackupCommand command, String vmName, String backupRepoType, String backupRepoAddress,
             String mountOptions, String backupPath, List<String> diskPaths, String mode,
-            String bitmapNew, String bitmapParent, List<String> parentPaths, int timeout) {
+            String bitmapNew, String bitmapParent, List<String> parentPaths,
+            Map<String, String> secretUuids, Map<String, String> keyFilePaths, int timeout) {
         List<String> argv = new ArrayList<>(Arrays.asList(
                 libvirtComputingResource.getNasBackupPath(),
                 "-o", "backup",
@@ -169,6 +227,11 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
             argv.add("--parent-paths");
             argv.add(String.join(",", parentPaths));
         }
+        // Per-volume qemu secret uuids and key file paths for encrypted volumes; empty when none are.
+        argv.add("-S");
+        argv.add(joinVolumeMap(secretUuids));
+        argv.add("-K");
+        argv.add(joinVolumeMap(keyFilePaths));
 
         List<String[]> commands = new ArrayList<>();
         commands.add(argv.toArray(new String[0]));
@@ -257,6 +320,32 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
         } catch (NumberFormatException e) {
             logger.debug("Ignoring non-numeric line in backup script output: {}", line.trim());
             return null;
+        }
+    }
+
+    /** Renders a per-volume map as the "&lt;volumePath&gt;:&lt;value&gt;,..." form the backup script parses. */
+    protected String joinVolumeMap(Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return "";
+        }
+        List<String> entries = new ArrayList<>();
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            entries.add(entry.getKey() + ":" + entry.getValue());
+        }
+        return String.join(",", entries);
+    }
+
+    /** Removes the ephemeral libvirt secrets registered for this backup; never throws. */
+    private void removeBackupSecrets(LibvirtComputingResource libvirtComputingResource, Connect conn, java.util.Collection<String> secretUuids) {
+        if (conn == null) {
+            return;
+        }
+        for (String secretUuid : secretUuids) {
+            try {
+                libvirtComputingResource.removeLibvirtVolumeSecret(conn, secretUuid);
+            } catch (LibvirtException ex) {
+                logger.warn("Failed to remove the libvirt secret [{}] used for a backup. The error was: {}", secretUuid, ex.getMessage(), ex);
+            }
         }
     }
 }

@@ -24,7 +24,9 @@ import com.cloud.agent.api.LogLevel;
 import com.cloud.vm.VirtualMachine;
 import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class RestoreBackupCommand extends Command  {
     private String vmName;
@@ -40,9 +42,36 @@ public class RestoreBackupCommand extends Command  {
     private Boolean vmExists;
     private VirtualMachine.State vmState;
     private Integer mountTimeout;
+    /**
+     * Passphrase of every encrypted volume being restored, keyed by volume path. The backup itself is
+     * LUKS-encrypted (see TakeBackupCommand), so the agent needs these both to read the backup and to
+     * write the data back through the volume's own encryption.
+     */
+    @LogLevel(LogLevel.Log4jLevel.Off)
+    private Map<String, byte[]> volumePassphrases;
 
     protected RestoreBackupCommand() {
         super();
+    }
+
+    public Map<String, byte[]> getVolumePassphrases() {
+        return volumePassphrases;
+    }
+
+    public void setVolumePassphrases(Map<String, byte[]> volumePassphrases) {
+        this.volumePassphrases = volumePassphrases;
+    }
+
+    /** Wipes the passphrases once the command has been handled. */
+    public void clearPassphrases() {
+        if (volumePassphrases == null) {
+            return;
+        }
+        for (byte[] passphrase : volumePassphrases.values()) {
+            if (passphrase != null) {
+                Arrays.fill(passphrase, (byte) 0);
+            }
+        }
     }
 
     public String getVmName() {

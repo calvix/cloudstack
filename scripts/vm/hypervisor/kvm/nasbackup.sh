@@ -42,6 +42,12 @@ PARENT_PATHS=""       # For incremental: comma-separated list of parent backup f
                       # is rebased onto its corresponding parent file. Required because
                       # data-disk backup files don't share the root volume's UUID, so
                       # each disk must be rebased onto its own parent.
+# Encrypted volumes: "<volUuid>:<libvirtSecretUuid>,..." used to make QEMU write the backup
+# already LUKS-encrypted, and "<volUuid>:<keyFilePath>,..." for the qemu-img paths, which
+# cannot consume libvirt secrets. Both are keyed by volume uuid; a volume absent from the map
+# is not encrypted and is backed up exactly as before.
+SECRET_MAP=""
+KEYFILE_MAP=""
 logFile="/var/log/cloudstack/agent/agent.log"
 UNMOUNT_TIMEOUT=60
 EXIT_CLEANUP_FAILED=20
@@ -98,6 +104,23 @@ sanity_checks() {
 }
 
 ### Operation methods ###
+
+# Look up "<volUuid>:<value>,..." maps; echoes an empty string when the volume has no entry.
+lookup_for_vol() {
+  local map="$1" volUuid="$2" entry
+  [[ -z "$map" ]] && { echo ""; return; }
+  local IFS=,
+  for entry in $map; do
+    if [[ "${entry%%:*}" == "$volUuid" ]]; then
+      echo "${entry#*:}"
+      return
+    fi
+  done
+  echo ""
+}
+
+secret_for_vol() { lookup_for_vol "$SECRET_MAP" "$1"; }
+keyfile_for_vol() { lookup_for_vol "$KEYFILE_MAP" "$1"; }
 
 get_ceph_uuid_from_path() {
   local fullpath="$1"
@@ -239,11 +262,18 @@ print(len(files))
     else
         volUuid="${fullpath##*/}"
     fi
-    if [[ "$effective_mode" == "incremental" ]]; then
-      # Incremental disk entry — no backupmode attr, libvirt picks it up from <incremental>.
-      echo "<disk name='$disk' backup='yes' type='file'><driver type='qcow2'/><target file='$dest/$name.$volUuid.qcow2' /></disk>" >> $dest/backup.xml
+    secretUuid=$(secret_for_vol "$volUuid")
+    if [[ -n "$secretUuid" ]]; then
+      # QEMU writes the backup already encrypted, so plaintext never reaches the backup target.
+      targetXml="<target file='$dest/$name.$volUuid.qcow2'><encryption format='luks' engine='qemu'><secret type='passphrase' uuid='$secretUuid'/></encryption></target>"
     else
-      echo "<disk name='$disk' backup='yes' type='file' backupmode='full'><driver type='qcow2'/><target file='$dest/$name.$volUuid.qcow2' /></disk>" >> $dest/backup.xml
+      targetXml="<target file='$dest/$name.$volUuid.qcow2' />"
+    fi
+    if [[ "$effective_mode" == "incremental" ]]; then
+      # Incremental disk entry - no backupmode attr, libvirt picks it up from <incremental>.
+      echo "<disk name='$disk' backup='yes' type='file'><driver type='qcow2'/>$targetXml</disk>" >> $dest/backup.xml
+    else
+      echo "<disk name='$disk' backup='yes' type='file' backupmode='full'><driver type='qcow2'/>$targetXml</disk>" >> $dest/backup.xml
     fi
     if [[ $make_checkpoint -eq 1 ]]; then
       echo "<disk name='$disk'/>" >> $dest/checkpoint.xml
@@ -363,6 +393,12 @@ print(len(files))
       name="datadisk"
       continue
     fi
+    if [[ -n "$(secret_for_vol "$volUuid")" ]]; then
+      # The backup is LUKS-encrypted; the sparsify pass would have to decrypt and re-encrypt it,
+      # so skip the optimisation rather than write the data out in the clear.
+      name="datadisk"
+      continue
+    fi
     if ! qemu-img convert -O qcow2 "$dest/$name.$volUuid.qcow2" "$dest/$name.$volUuid.qcow2.tmp" >> "$logFile" 2> >(cat >&2); then
       echo "qemu-img convert failed for $dest/$name.$volUuid.qcow2"
       cleanup
@@ -444,7 +480,22 @@ backup_stopped_vm() {
       volUuid="${disk##*/}"
     fi
     output="$dest/$name.$volUuid.qcow2"
-    if ! qemu-img convert -O qcow2 "$disk" "$output" >> "$logFile" 2> >(cat >&2); then
+    keyFile=$(keyfile_for_vol "$volUuid")
+    if [[ -n "$keyFile" ]]; then
+      # Encrypted volume: read it through its own encryption and write the backup encrypted with
+      # the same passphrase, matching what the running-VM path produces.
+      if [[ "$disk" == rbd:* ]]; then
+        srcOpts="--image-opts driver=rbd,filename=$disk,encrypt.format=luks2,encrypt.key-secret=sec0"
+      else
+        srcOpts="--image-opts driver=luks,file.filename=$disk,key-secret=sec0"
+      fi
+      if ! qemu-img convert --object "secret,id=sec0,file=$keyFile" $srcOpts \
+            -O qcow2 -o encrypt.format=luks,encrypt.key-secret=sec0 "$output" >> "$logFile" 2> >(cat >&2); then
+        echo "qemu-img convert failed for encrypted $disk $output"
+        cleanup
+        exit 1
+      fi
+    elif ! qemu-img convert -O qcow2 "$disk" "$output" >> "$logFile" 2> >(cat >&2); then
       echo "qemu-img convert failed for $disk $output"
       cleanup
       exit 1
@@ -533,7 +584,7 @@ cleanup() {
 
 function usage {
   echo ""
-  echo "Usage: $0 -o <operation> -v|--vm <domain name> -t <storage type> -s <storage address> -m <mount options> -p <backup path> -d <disks path> -q|--quiesce <true|false>"
+  echo "Usage: $0 -o <operation> -v|--vm <domain name> -t <storage type> -s <storage address> -m <mount options> -p <backup path> -d <disks path> -q|--quiesce <true|false> [-S <volUuid:secretUuid,...>] [-K <volUuid:keyFile,...>]"
   echo "         [-M|--mode <full|incremental>] [--bitmap-new <name>] [--bitmap-parent <name>] [--parent-paths <p1,p2,...>]"
   echo ""
   echo "Incremental backup options (running VMs only; requires QEMU >= 4.2 and libvirt >= 7.2):"
@@ -606,6 +657,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --parent-paths)
       PARENT_PATHS="$2"
+      shift
+      shift
+      ;;
+    -S|--secrets)
+      SECRET_MAP="$2"
+      shift
+      shift
+      ;;
+    -K|--keyfiles)
+      KEYFILE_MAP="$2"
       shift
       shift
       ;;

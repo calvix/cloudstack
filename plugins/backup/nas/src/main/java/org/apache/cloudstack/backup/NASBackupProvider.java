@@ -36,6 +36,8 @@ import com.cloud.storage.VolumeVO;
 import com.cloud.storage.dao.DiskOfferingDao;
 import com.cloud.storage.dao.StoragePoolHostDao;
 import com.cloud.storage.dao.VolumeDao;
+import org.apache.cloudstack.secret.PassphraseVO;
+import org.apache.cloudstack.secret.dao.PassphraseDao;
 import com.cloud.utils.Pair;
 import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.db.GlobalLock;
@@ -71,6 +73,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -129,6 +132,9 @@ public class NASBackupProvider extends AdapterBase implements BackupProvider, Co
 
     @Inject
     private VolumeDao volumeDao;
+
+    @Inject
+    private PassphraseDao passphraseDao;
 
     @Inject
     private StoragePoolHostDao storagePoolHostDao;
@@ -591,6 +597,11 @@ public class NASBackupProvider extends AdapterBase implements BackupProvider, Co
             command.setVolumePaths(volumePoolsAndPaths.second());
         }
 
+        // Sent for every VM state: an encrypted volume must not be written to the backup target in
+        // the clear, and the running-VM path enumerates its disks from libvirt rather than from the
+        // paths above.
+        command.setVolumePassphrases(getVolumePassphrases(volumeDao.findByInstance(vm.getId())));
+
         BackupAnswer answer;
         try {
             answer = (BackupAnswer) agentManager.send(host.getId(), command);
@@ -719,6 +730,9 @@ public class NASBackupProvider extends AdapterBase implements BackupProvider, Co
         restoreCommand.setRestoreVolumePools(volumePoolsAndPaths.first());
         restoreCommand.setRestoreVolumePaths(volumePoolsAndPaths.second());
         restoreCommand.setBackupFiles(getBackupFiles(backedVolumes));
+        // The backup of an encrypted volume is itself LUKS-encrypted, so the agent needs the
+        // passphrase to read it back and to rewrite the volume through its own encryption.
+        restoreCommand.setVolumePassphrases(getVolumePassphrases(restoreVolumes));
         restoreCommand.setVmExists(vm.getRemoved() == null);
         restoreCommand.setVmState(vm.getState());
         restoreCommand.setMountTimeout(NASBackupRestoreMountTimeout.value());
@@ -745,6 +759,28 @@ public class NASBackupProvider extends AdapterBase implements BackupProvider, Co
             backupFiles.add(backedVolume.getPath());
         }
         return backupFiles;
+    }
+
+    /**
+     * Passphrases of the encrypted volumes among {@code volumes}, keyed by volume path (the uuid the
+     * backup files are named after). Unencrypted volumes are omitted, so an empty map means there is
+     * nothing to encrypt and the backup behaves exactly as before.
+     */
+    private Map<String, byte[]> getVolumePassphrases(List<VolumeVO> volumes) {
+        Map<String, byte[]> passphrases = new HashMap<>();
+        for (VolumeVO volume : volumes) {
+            if (volume.getPassphraseId() == null) {
+                continue;
+            }
+            PassphraseVO passphrase = passphraseDao.findById(volume.getPassphraseId());
+            if (passphrase == null || passphrase.getPassphrase() == null || passphrase.getPassphrase().length == 0) {
+                throw new CloudRuntimeException(String.format(
+                        "Volume %s is encrypted but its passphrase could not be read; refusing to back it up unencrypted",
+                        volume.getUuid()));
+            }
+            passphrases.put(volume.getPath(), passphrase.getPassphrase());
+        }
+        return passphrases;
     }
 
     private Pair<List<PrimaryDataStoreTO>, List<String>> getVolumePoolsAndPaths(List<VolumeVO> volumes) {

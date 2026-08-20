@@ -23,7 +23,9 @@ import com.cloud.agent.api.Command;
 import com.cloud.agent.api.LogLevel;
 import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class TakeBackupCommand extends Command {
     private String vmName;
@@ -35,6 +37,15 @@ public class TakeBackupCommand extends Command {
     private Boolean quiesce;
     @LogLevel(LogLevel.Log4jLevel.Off)
     private String mountOptions;
+    /**
+     * Passphrase of every encrypted volume of the VM, keyed by volume path (the uuid the backup
+     * files are named after). Volumes that are not encrypted are absent. The agent uses these to
+     * make the backup itself LUKS-encrypted, so an encrypted volume is never written out in the
+     * clear. Keyed rather than positional because the running-VM path enumerates disks from
+     * libvirt instead of from {@link #volumePaths}.
+     */
+    @LogLevel(LogLevel.Log4jLevel.Off)
+    private Map<String, byte[]> volumePassphrases;
 
     // Incremental backup fields (NAS provider; null/empty for legacy full-only callers).
     private String mode;          // "full" or "incremental"; null => legacy behaviour (script default)
@@ -51,6 +62,26 @@ public class TakeBackupCommand extends Command {
         super();
         this.vmName = vmName;
         this.backupPath = backupPath;
+    }
+
+    public Map<String, byte[]> getVolumePassphrases() {
+        return volumePassphrases;
+    }
+
+    public void setVolumePassphrases(Map<String, byte[]> volumePassphrases) {
+        this.volumePassphrases = volumePassphrases;
+    }
+
+    /** Wipes the passphrases once the command has been handled. */
+    public void clearPassphrases() {
+        if (volumePassphrases == null) {
+            return;
+        }
+        for (byte[] passphrase : volumePassphrases.values()) {
+            if (passphrase != null) {
+                Arrays.fill(passphrase, (byte) 0);
+            }
+        }
     }
 
     public String getVmName() {

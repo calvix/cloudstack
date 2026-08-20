@@ -32,9 +32,12 @@ import java.util.Objects;
 import org.apache.cloudstack.backup.BackupAnswer;
 import org.apache.cloudstack.backup.RestoreBackupCommand;
 import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
+import org.apache.cloudstack.utils.cryptsetup.KeyFile;
+import org.apache.cloudstack.utils.qemu.QemuImageOptions;
 import org.apache.cloudstack.utils.qemu.QemuImg;
 import org.apache.cloudstack.utils.qemu.QemuImgException;
 import org.apache.cloudstack.utils.qemu.QemuImgFile;
+import org.apache.cloudstack.utils.qemu.QemuObject;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.libvirt.LibvirtException;
@@ -55,6 +58,13 @@ import com.cloud.vm.VirtualMachine;
 @ResourceWrapper(handles = RestoreBackupCommand.class)
 public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBackupCommand, Answer, LibvirtComputingResource> {
     private static final String BACKUP_TEMP_FILE_PREFIX = "csbackup";
+    /** qemu secret id used while reading an encrypted backup and writing it back to the volume. */
+    private static final String RESTORE_SECRET_ID = "restoresec0";
+    /**
+     * Passphrases of the volumes being restored, keyed by volume path. Held for the duration of a
+     * single execute() so the per-volume restore helpers can reach them.
+     */
+    private Map<String, byte[]> currentVolumePassphrases;
     private static final String FILE_PATH_PLACEHOLDER = "%s/%s";
     // Detects whether a qcow2 file references a parent in its backing-file metadata.
     // Returns 0 (true) when a backing file is present, 1 when not. Uses --output=json
@@ -92,6 +102,7 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
         int timeout = command.getWait() > 0 ? command.getWait() * 1000 : serverResource.getCmdsTimeout();
         KVMStoragePoolManager storagePoolMgr = serverResource.getStoragePoolMgr();
         List<String> backupFiles = command.getBackupFiles();
+        currentVolumePassphrases = command.getVolumePassphrases();
 
         String newVolumeId = null;
         try {
@@ -302,6 +313,11 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
         return replaceVolumeWithBackup(storagePoolMgr, volumePool, volumePath, backupPath, timeout, false, null);
     }
 
+    /** Passphrase of the volume being restored, or null when it is not encrypted. */
+    private byte[] passphraseFor(String volumePath) {
+        return currentVolumePassphrases == null ? null : currentVolumePassphrases.get(volumePath);
+    }
+
     private boolean replaceVolumeWithBackup(KVMStoragePoolManager storagePoolMgr, PrimaryDataStoreTO volumePool, String volumePath, String backupPath, int timeout, boolean createTargetVolume, Long size) {
         if (List.of(Storage.StoragePoolType.RBD, Storage.StoragePoolType.Linstor).contains(volumePool.getPoolType())) {
             return replaceBlockDeviceWithBackup(storagePoolMgr, volumePool, volumePath, backupPath, timeout, createTargetVolume, size);
@@ -327,6 +343,49 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
     private boolean hasBackingChain(String qcow2Path) {
         return Script.runSimpleBashScriptForExitValue(
                 String.format(QEMU_IMG_HAS_BACKING_COMMAND, qcow2Path)) == 0;
+    }
+
+    /**
+     * Restores a LUKS-encrypted backup onto an encrypted volume. The backup is opened with its
+     * passphrase and written through the volume's own encryption, so the restored volume carries the
+     * same LUKS header the rest of CloudStack expects; writing the decrypted bytes straight onto the
+     * volume would leave an image the hypervisor can no longer open.
+     */
+    private void restoreEncryptedBlockDevice(QemuImg qemu, PrimaryDataStoreTO volumePool, KVMStoragePool volumeStoragePool,
+            String volumePath, String backupPath, byte[] passphrase) throws QemuImgException {
+        try (KeyFile keyFile = new KeyFile(passphrase)) {
+            EnumMap<QemuObject.ObjectParameter, String> secretParams = new EnumMap<>(QemuObject.ObjectParameter.class);
+            secretParams.put(QemuObject.ObjectParameter.ID, RESTORE_SECRET_ID);
+            secretParams.put(QemuObject.ObjectParameter.FILE, keyFile.toString());
+            QemuObject secret = new QemuObject(QemuObject.ObjectType.SECRET, secretParams);
+
+            Map<String, String> srcParams = new HashMap<>();
+            srcParams.put("driver", "qcow2");
+            srcParams.put("file.filename", backupPath);
+            srcParams.put("encrypt.key-secret", RESTORE_SECRET_ID);
+            QemuImageOptions srcOpts = new QemuImageOptions(srcParams);
+
+            if (!Storage.StoragePoolType.RBD.equals(volumePool.getPoolType())) {
+                throw new CloudRuntimeException(String.format(
+                        "Restoring an encrypted backup onto a %s volume is not supported yet", volumePool.getPoolType()));
+            }
+
+            Map<String, String> destParams = new HashMap<>();
+            destParams.put("driver", "rbd");
+            destParams.put("pool", volumeStoragePool.getSourceDir());
+            destParams.put("image", volumePath);
+            destParams.put("encrypt.format", QemuObject.EncryptFormat.LUKS2.toString());
+            destParams.put("encrypt.key-secret", RESTORE_SECRET_ID);
+            if (volumeStoragePool.getAuthUserName() != null) {
+                destParams.put("user", volumeStoragePool.getAuthUserName());
+            }
+            QemuImageOptions destOpts = new QemuImageOptions(destParams);
+
+            QemuImgFile srcFile = new QemuImgFile(backupPath, QemuImg.PhysicalDiskFormat.QCOW2);
+            qemu.convertIntoExistingTarget(srcFile, null, List.of(secret), srcOpts, destOpts, false);
+        } catch (IOException ex) {
+            throw new CloudRuntimeException(String.format("Failed to create the key file needed to restore %s", volumePath), ex);
+        }
     }
 
     private boolean replaceBlockDeviceWithBackup(KVMStoragePoolManager storagePoolMgr, PrimaryDataStoreTO volumePool, String volumePath, String backupPath, int timeout, boolean createTargetVolume, Long size) {
@@ -375,7 +434,14 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
             }
             destVolumeFile = new QemuImgFile(destVolume, QemuImg.PhysicalDiskFormat.RAW);
             logger.debug("Starting convert backup  {} to volume  {}", backupPath, volumePath);
-            qemu.convert(srcBackupFile, destVolumeFile);
+            byte[] passphrase = passphraseFor(volumePath);
+            if (passphrase != null && passphrase.length > 0) {
+                // The backup is LUKS-encrypted and the volume is encrypted too, so the data has to be
+                // read through the backup's encryption and written back through the volume's own.
+                restoreEncryptedBlockDevice(qemu, volumePool, volumeStoragePool, volumePath, backupPath, passphrase);
+            } else {
+                qemu.convert(srcBackupFile, destVolumeFile);
+            }
             logger.debug("Successfully converted backup {} to volume  {}", backupPath, volumePath);
         } catch (QemuImgException | LibvirtException e) {
             String srcFilename = srcBackupFile != null ? srcBackupFile.getFileName() : null;
