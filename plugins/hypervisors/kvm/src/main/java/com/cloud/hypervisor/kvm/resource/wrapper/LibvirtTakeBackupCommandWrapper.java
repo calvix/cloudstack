@@ -212,19 +212,51 @@ public class LibvirtTakeBackupCommandWrapper extends CommandWrapper<TakeBackupCo
      * Sum the per-disk size lines emitted by nasbackup.sh. Single-volume mode emits one
      * line containing just the byte count; multi-volume mode emits one line per disk
      * whose first whitespace-separated token is the byte count.
+     *
+     * Lines that do not start with a byte count are ignored rather than parsed. The
+     * script is not the only thing that can write to this stream: mount helpers and
+     * storage clients emit warnings of their own, and a single one of them used to
+     * abort the whole backup with a NumberFormatException. That failure is unusually
+     * expensive - the backup record stays in BackingUp with no timeout and no
+     * transition to Failed, and blocks every later restore of that instance - and it
+     * only ever hit the multi-volume branch, which is taken for a STOPPED instance,
+     * so it went unnoticed while running instances backed up normally.
      */
     private long parseBackupSize(String stdout, List<String> diskPaths) {
         long backupSize = 0L;
         if (CollectionUtils.isNullOrEmpty(diskPaths)) {
-            List<String> outputLines = Arrays.asList(stdout.split("\n"));
-            if (!outputLines.isEmpty()) {
-                backupSize = Long.parseLong(outputLines.get(outputLines.size() - 1).trim());
+            String[] outputLines = stdout.split("\n");
+            for (int i = outputLines.length - 1; i >= 0; i--) {
+                Long size = parseSizeLine(outputLines[i]);
+                if (size != null) {
+                    backupSize = size;
+                    break;
+                }
             }
         } else {
             for (String line : stdout.split("\n")) {
-                backupSize = backupSize + Long.parseLong(line.split(" ")[0].trim());
+                Long size = parseSizeLine(line);
+                if (size != null) {
+                    backupSize = backupSize + size;
+                }
             }
         }
         return backupSize;
+    }
+
+    /**
+     * The byte count a size line starts with, or null when the line is not one.
+     */
+    private Long parseSizeLine(String line) {
+        String token = line.trim().split("\\s+")[0];
+        if (token.isEmpty()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(token);
+        } catch (NumberFormatException e) {
+            logger.debug("Ignoring non-numeric line in backup script output: {}", line.trim());
+            return null;
+        }
     }
 }
