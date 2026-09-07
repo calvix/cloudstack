@@ -32,7 +32,6 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -1093,7 +1092,7 @@ public class NASBackupProviderTest {
         Mockito.when(backupDao.persist(Mockito.any(BackupVO.class))).thenAnswer(invocation -> invocation.getArgument(0));
         Mockito.when(backupDao.update(Mockito.anyLong(), Mockito.any(BackupVO.class))).thenReturn(true);
 
-        nasBackupProvider.takeBackup(vm, false);
+        nasBackupProvider.takeBackup(vm, false, false);
 
         ArgumentCaptor<TakeBackupCommand> captor = ArgumentCaptor.forClass(TakeBackupCommand.class);
         Mockito.verify(agentManager).send(anyLong(), captor.capture());

@@ -621,7 +621,12 @@ public class LibvirtRestoreBackupCommandWrapperTest {
                         .thenAnswer(invocation -> invocation.getArgument(0));
                 scriptMock.when(() -> Script.executeCommand(any(String[].class))).thenReturn(null);
                 scriptMock.when(() -> Script.executeCommandForExitValue(any(String[].class))).thenReturn(0);
-                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString())).thenReturn(0);
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString()))
+                        .thenAnswer(invocation -> {
+                            String command = invocation.getArgument(0);
+                            // No backing chain, so the restore takes the rsync path this test asserts on.
+                            return command.contains("backing-filename") ? 1 : 0;
+                        });
                 filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenReturn(true);
 
                 Answer result = wrapper.execute(command, libvirtComputingResource);
@@ -682,7 +687,12 @@ public class LibvirtRestoreBackupCommandWrapperTest {
                         .thenAnswer(invocation -> invocation.getArgument(0));
                 scriptMock.when(() -> Script.executeCommand(any(String[].class))).thenReturn(null);
                 scriptMock.when(() -> Script.executeCommandForExitValue(any(String[].class))).thenReturn(0);
-                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString())).thenReturn(0);
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString()))
+                        .thenAnswer(invocation -> {
+                            String command = invocation.getArgument(0);
+                            // No backing chain, so the restore takes the rsync path this test asserts on.
+                            return command.contains("backing-filename") ? 1 : 0;
+                        });
                 filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenReturn(true);
 
                 Answer result = wrapper.execute(command, libvirtComputingResource);
@@ -734,7 +744,12 @@ public class LibvirtRestoreBackupCommandWrapperTest {
                         .thenAnswer(invocation -> invocation.getArgument(0));
                 scriptMock.when(() -> Script.executeCommand(any(String[].class))).thenReturn(null);
                 scriptMock.when(() -> Script.executeCommandForExitValue(any(String[].class))).thenReturn(0);
-                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString())).thenReturn(0);
+                scriptMock.when(() -> Script.runSimpleBashScriptForExitValue(anyString()))
+                        .thenAnswer(invocation -> {
+                            String command = invocation.getArgument(0);
+                            // No backing chain, so the restore takes the rsync path this test asserts on.
+                            return command.contains("backing-filename") ? 1 : 0;
+                        });
                 filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenReturn(true);
 
                 Answer result = wrapper.execute(command, libvirtComputingResource);
