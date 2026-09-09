@@ -20,13 +20,16 @@
 package com.cloud.hypervisor.kvm.resource.wrapper;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 import org.apache.cloudstack.backup.BackupAnswer;
@@ -126,11 +129,38 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
                                             String backupPath, List<String> backupFiles, String mountDirectory, int timeout) {
         String diskType = "root";
         try {
-            for (int idx = 0; idx < restoreVolumePaths.size(); idx++) {
-                PrimaryDataStoreTO restoreVolumePool = restoreVolumePools.get(idx);
-                String restoreVolumePath = restoreVolumePaths.get(idx);
-                String backupFile = backupFiles.get(idx);
+            // Match each backed up volume to the instance's volume with the SAME UUID. Both lists
+            // arrive ordered by device id, but device ids are not stable across restores, so relying
+            // on the position within the list can write a backup into a different volume than the one
+            // it was taken from.
+            Map<String, Integer> targetIndexByVolumeUuid = new HashMap<>();
+            for (int i = 0; i < restoreVolumePaths.size(); i++) {
+                targetIndexByVolumeUuid.put(getVolumeUuidFromPath(restoreVolumePaths.get(i), restoreVolumePools.get(i)), i);
+            }
+
+            // Creating an instance from a backup gives it brand new volumes, so none of the uuids
+            // recorded in the backup can match. Only then fall back to the device id ordering both
+            // lists already carry; when some of them do match, a missing one really is a volume that
+            // was detached, and writing its backup into another volume would be wrong.
+            boolean restoringIntoNewVolumes = backedVolumesUUIDs.stream().noneMatch(targetIndexByVolumeUuid::containsKey);
+            if (restoringIntoNewVolumes && backedVolumesUUIDs.size() != restoreVolumePaths.size()) {
+                throw new CloudRuntimeException(String.format("Unable to restore backup: it holds %d volumes but the instance has %d.",
+                        backedVolumesUUIDs.size(), restoreVolumePaths.size()));
+            }
+            if (restoringIntoNewVolumes) {
+                logger.debug("None of the backed up volumes belong to this instance; restoring into its volumes in device id order.");
+            }
+
+            for (int idx = 0; idx < backedVolumesUUIDs.size(); idx++) {
                 String backupVolumeUuid = backedVolumesUUIDs.get(idx);
+                Integer targetIdx = restoringIntoNewVolumes ? Integer.valueOf(idx) : targetIndexByVolumeUuid.get(backupVolumeUuid);
+                if (targetIdx == null) {
+                    throw new CloudRuntimeException(String.format("Unable to restore backup: volume [%s] recorded in the backup"
+                            + " is not attached to the instance any more.", backupVolumeUuid));
+                }
+                PrimaryDataStoreTO restoreVolumePool = restoreVolumePools.get(targetIdx);
+                String restoreVolumePath = restoreVolumePaths.get(targetIdx);
+                String backupFile = backupFiles.get(idx);
                 String fullPath = getBackupPath(mountDirectory, backupPath, backupFile, diskType);
                 diskType = "datadisk";
 
@@ -340,38 +370,68 @@ public class LibvirtRestoreBackupCommandWrapper extends CommandWrapper<RestoreBa
 
     private boolean attachVolumeToVm(KVMStoragePoolManager storagePoolMgr, String vmName, PrimaryDataStoreTO volumePool, String volumePath) {
         String deviceToAttachDiskTo = getDeviceToAttachDisk(vmName);
+        if (Storage.StoragePoolType.RBD.equals(volumePool.getPoolType())) {
+            return attachRbdVolumeToVm(storagePoolMgr, vmName, volumePool, volumePath, deviceToAttachDiskTo);
+        }
         List<String> virshCmd = new ArrayList<>();
         virshCmd.add(Script.getExecutableAbsolutePath("virsh"));
-        if (volumePool.getPoolType() == Storage.StoragePoolType.RBD) {
-            String xmlForRbdDisk = getXmlForRbdDisk(storagePoolMgr, volumePool, volumePath, deviceToAttachDiskTo);
-            logger.debug("RBD disk xml to attach: {}", xmlForRbdDisk);
-            virshCmd.add("attach-device");
-            virshCmd.add(vmName);
-            virshCmd.add("/dev/stdin");
-            virshCmd.add("<<EOF%sEOF");
-        } else {
-            virshCmd.add("attach-disk");
-            virshCmd.add(vmName);
-            virshCmd.add(volumePath);
-            virshCmd.add(deviceToAttachDiskTo);
-            if (Storage.StoragePoolType.Linstor.equals(volumePool.getPoolType())) {
-                virshCmd.add("--subdriver");
-                virshCmd.add("qcow2");
-            }
-            virshCmd.add("--cache");
-            virshCmd.add("none");
+        virshCmd.add("attach-disk");
+        virshCmd.add(vmName);
+        virshCmd.add(volumePath);
+        virshCmd.add(deviceToAttachDiskTo);
+        virshCmd.add("--driver");
+        virshCmd.add("qemu");
+        if (!Storage.StoragePoolType.Linstor.equals(volumePool.getPoolType())) {
+            virshCmd.add("--subdriver");
+            virshCmd.add("qcow2");
         }
+        virshCmd.add("--cache");
+        virshCmd.add("none");
         int exitValue = Script.executeCommandForExitValue(virshCmd.toArray(new String[0]));
         return exitValue == 0;
+    }
+
+    private boolean attachRbdVolumeToVm(KVMStoragePoolManager storagePoolMgr, String vmName, PrimaryDataStoreTO volumePool, String volumePath,
+            String deviceToAttachDiskTo) {
+        String xmlForRbdDisk = getXmlForRbdDisk(storagePoolMgr, volumePool, volumePath, deviceToAttachDiskTo);
+        logger.debug("RBD disk xml to attach: {}", xmlForRbdDisk);
+        // The command is executed without a shell, so the XML cannot be piped in through a
+        // here-document. Write it to a temporary file and pass virsh the path instead.
+        Path xmlFile = null;
+        try {
+            xmlFile = Files.createTempFile("csrestore-rbd-", ".xml");
+            Files.write(xmlFile, xmlForRbdDisk.getBytes(StandardCharsets.UTF_8));
+            String[] virshCmd = new String[] { Script.getExecutableAbsolutePath("virsh"), "attach-device", vmName, xmlFile.toString() };
+            return Script.executeCommandForExitValue(virshCmd) == 0;
+        } catch (IOException e) {
+            logger.error("Failed to write the RBD disk XML used to attach volume [{}] to VM [{}]", volumePath, vmName, e);
+            return false;
+        } finally {
+            if (xmlFile != null) {
+                try {
+                    Files.deleteIfExists(xmlFile);
+                } catch (IOException e) {
+                    logger.warn("Failed to delete the temporary RBD disk XML file [{}].", xmlFile, e);
+                }
+            }
+        }
     }
 
     private String getDeviceToAttachDisk(String vmName) {
         String[] domblkCmd = new String[] { Script.getExecutableAbsolutePath("virsh"), "domblklist", "--domain", vmName };
         String[] tailCmd = new String[] { Script.getExecutableAbsolutePath("tail"), "-n", "3" };
         String[] headCmd = new String[] { Script.getExecutableAbsolutePath("head"), "-n", "1" };
-        String[] awkCmd = new String[] { Script.getExecutableAbsolutePath("awk"), "'{print $1}'" };
+        // The commands are executed without a shell, so the awk program must be passed as a plain
+        // argument. Keeping the quotes a shell would have stripped makes awk fail with
+        // "invalid char" and produce no output.
+        String[] awkCmd = new String[] { Script.getExecutableAbsolutePath("awk"), "{print $1}" };
         Pair<Integer, String> result = Script.executePipedCommands(Arrays.asList(domblkCmd, tailCmd, headCmd, awkCmd), 0);
-        String currentDevice = result.second();
+        // executePipedCommands appends a line separator to every line it reads, so the device
+        // name has to be trimmed before the last character can be incremented.
+        String currentDevice = result.second() == null ? "" : result.second().trim();
+        if (result.first() == null || result.first() != 0 || StringUtils.isBlank(currentDevice)) {
+            throw new CloudRuntimeException(String.format("Failed to determine the device to attach the restored volume to on VM [%s].", vmName));
+        }
         char lastChar = currentDevice.charAt(currentDevice.length() - 1);
         char incrementedChar = (char) (lastChar + 1);
         return currentDevice.substring(0, currentDevice.length() - 1) + incrementedChar;
