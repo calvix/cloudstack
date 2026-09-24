@@ -3833,7 +3833,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
 
             DiskDef.DiskBus diskBusTypeData = getDataDiskModelFromVMDetail(vmSpec);
             if (diskBusTypeData == null) {
-                diskBusTypeData = (diskBusType == DiskDef.DiskBus.SCSI) ? diskBusType : DiskDef.DiskBus.VIRTIO;
+                diskBusTypeData = (diskBusType == DiskDef.DiskBus.SCSI || diskBusType == DiskDef.DiskBus.VIRTIOBLK) ? diskBusType : DiskDef.DiskBus.VIRTIO;
             }
 
             final DiskDef disk = new DiskDef();
@@ -4256,13 +4256,15 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
                     if (disk.getDeviceType() == DeviceType.DISK) {
                         if (disk.getBusType() == DiskDef.DiskBus.SCSI) {
                             busT = DiskDef.DiskBus.SCSI;
+                        } else if (disk.getBusType() == DiskDef.DiskBus.VIRTIOBLK) {
+                            busT = DiskDef.DiskBus.VIRTIOBLK;
                         }
                         break;
                     }
                 }
 
                 diskdef = new DiskDef();
-                if (busT == DiskDef.DiskBus.SCSI) {
+                if (busT == DiskDef.DiskBus.SCSI || busT == DiskDef.DiskBus.VIRTIOBLK) {
                     diskdef.setQemuDriver(true);
                     diskdef.setDiscard(DiscardType.UNMAP);
                 }
