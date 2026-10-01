@@ -765,7 +765,7 @@ public class KVMStorageProcessorTest {
             Mockito.verify(rbd.constructed().get(0)).close(rbdImageMock);
             Mockito.verify(radosMock).ioCtxDestroy(ioCtxMock);
         }
-
+    }
     private LibvirtVMDef.DiskDef diskWithBus(LibvirtVMDef.DiskDef.DiskBus bus) {
         LibvirtVMDef.DiskDef disk = new LibvirtVMDef.DiskDef();
         disk.defFileBasedDisk("/var/lib/libvirt/images/disk.qcow2", 0, bus, LibvirtVMDef.DiskDef.DiskFmtType.QCOW2);
