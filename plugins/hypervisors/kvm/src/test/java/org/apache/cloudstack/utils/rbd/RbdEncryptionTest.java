@@ -144,6 +144,36 @@ public class RbdEncryptionTest {
     }
 
     @Test
+    public void copyTemplateDenseWritesZeroRangesAndLeavesTheCopyPlaintext() throws Exception {
+        RbdEncryption spy = Mockito.spy(new RbdEncryption());
+        QemuImg qemuImg = Mockito.mock(QemuImg.class);
+        Mockito.doReturn(qemuImg).when(spy).createQemuImg();
+
+        spy.copyTemplateDense("1.2.3.4", 6789, "cloudstack", "secret", "cloudstack", "tmpl", "tmpl-luks");
+
+        // The whole point of this copy: without -S 0 it inherits the template's holes, and a hole in
+        // the parent of an encrypted clone is read through the crypto layer - as garbage - as soon as
+        // anything writes into the same 4 MiB object.
+        Mockito.verify(qemuImg).setWriteZeroRanges(true);
+
+        ArgumentCaptor<QemuImageOptions> srcOpts = ArgumentCaptor.forClass(QemuImageOptions.class);
+        ArgumentCaptor<QemuImageOptions> destOpts = ArgumentCaptor.forClass(QemuImageOptions.class);
+        Mockito.verify(qemuImg).convertIntoExistingTarget(Mockito.any(QemuImgFile.class), Mockito.isNull(),
+                Mockito.isNull(), srcOpts.capture(), destOpts.capture(), Mockito.eq(false));
+
+        String src = String.join(" ", srcOpts.getValue().toCommandFlag());
+        Assert.assertTrue(src, src.startsWith("--image-opts "));
+        Assert.assertTrue(src, src.contains("pool=cloudstack"));
+        Assert.assertTrue(src, src.contains("image=tmpl"));
+
+        String dest = String.join(" ", destOpts.getValue().toCommandFlag(QemuImg.TARGET_IMAGE_OPTS_FLAG));
+        Assert.assertTrue(dest, dest.startsWith(QemuImg.TARGET_IMAGE_OPTS_FLAG + " "));
+        Assert.assertTrue(dest, dest.contains("image=tmpl-luks"));
+        // the base image is a plaintext copy; the LUKS header belongs to the clone, not to the base
+        Assert.assertFalse(dest, dest.contains("encrypt."));
+    }
+
+    @Test
     public void formatRejectsEmptyPassphrase() {
         Assert.assertThrows(CloudRuntimeException.class, () -> rbdEncryption.format(
                 "1.2.3.4", 6789, "cloudstack", "secret", "cloudstack", "img",

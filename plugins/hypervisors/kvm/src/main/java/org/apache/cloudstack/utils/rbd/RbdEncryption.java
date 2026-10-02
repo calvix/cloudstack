@@ -253,6 +253,40 @@ public class RbdEncryption {
     /**
      * Seam for unit tests; {@link QemuImg} probes the qemu version through libvirt on construction.
      */
+    /**
+     * Copy a plaintext RBD image onto an existing image in the same pool, writing out its zero ranges
+     * too ({@code -S 0}), so the copy has no holes. Used for the base image encrypted roots are cloned
+     * from: a hole in that parent reads as garbage through the clone's encryption once a guest write
+     * copies up the object around it.
+     */
+    public void copyTemplateDense(String monHost, int monPort, String authUser, String authSecret,
+                                  String cephPool, String srcImage, String destImage) {
+        Path conf = null;
+        Path keyring = null;
+        try {
+            final FileAttribute<?> ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
+            keyring = Files.createTempFile("cs-ceph-", ".keyring", ownerOnly);
+            Files.writeString(keyring, "[client." + authUser + "]\n\tkey = " + authSecret + "\n");
+            conf = Files.createTempFile("cs-ceph-", ".conf", ownerOnly);
+            Files.writeString(conf, "[global]\nmon_host = " + monSpec(monHost, monPort) + "\nkeyring = " + keyring + "\n");
+
+            QemuImgFile srcQemuFile = new QemuImgFile(cephPool + "/" + srcImage, QemuImg.PhysicalDiskFormat.RAW);
+            QemuImageOptions srcImageOpts = new QemuImageOptions(rbdImageOptions(cephPool, srcImage, conf.toString(), authUser));
+            srcImageOpts.setImageOptsFlag(true);
+            QemuImageOptions destImageOpts = new QemuImageOptions(rbdImageOptions(cephPool, destImage, conf.toString(), authUser));
+
+            QemuImg qemu = createQemuImg();
+            qemu.setWriteZeroRanges(true);
+            qemu.convertIntoExistingTarget(srcQemuFile, null, null, srcImageOpts, destImageOpts, false);
+            logger.debug("Copied RBD image {}/{} into {} without holes", cephPool, srcImage, destImage);
+        } catch (IOException | QemuImgException | LibvirtException ex) {
+            throw new CloudRuntimeException(String.format("Failed to copy RBD image %s/%s into %s", cephPool, srcImage, destImage), ex);
+        } finally {
+            deleteQuietly(conf);
+            deleteQuietly(keyring);
+        }
+    }
+
     protected QemuImg createQemuImg() throws QemuImgException, LibvirtException {
         return new QemuImg(0);
     }

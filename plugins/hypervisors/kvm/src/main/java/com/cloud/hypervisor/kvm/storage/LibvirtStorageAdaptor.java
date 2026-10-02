@@ -101,6 +101,9 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
        usable (decrypted) size still matches the requested volume size. */
     private static final long LUKS2_HEADER_RESERVE_BYTES = 16L << 20; // 16 MiB
 
+    /** Suffix of the per-template base image encrypted roots are cloned from. */
+    private static final String LUKS_CLONE_BASE_SUFFIX = "-luks";
+
     private static final Set<StoragePoolType> QEMU_IMG_MANAGED_POOL_TYPES = Set.of(StoragePoolType.NetworkFilesystem, StoragePoolType.Filesystem, StoragePoolType.SharedMountPoint);
 
     public LibvirtStorageAdaptor(StorageLayer storage) {
@@ -1200,6 +1203,7 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                     }
                     logger.info("Successfully unprotected and removed any remaining snapshots (" + snaps.size() + ") of "
                         + pool.getSourceDir() + "/" + uuid + " Continuing to remove the RBD image");
+                    removeLuksCloneBaseIfPresent(rbd, uuid);
                 } catch (RbdException e) {
                     logger.error("Failed to remove snapshot with exception: " + e.toString() +
                         ", RBD error: " + ErrorCode.getErrorMessage(e.getReturnValue()));
@@ -1526,20 +1530,18 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
 
     /**
      * Option A (thin CoW encrypted root), used when the template already lives on the same RBD cluster
-     * as the destination pool. Per the Ceph "Image Encryption" clone recipe: grow the template base to
-     * reserve LUKS2-header space, snapshot+protect that grown state, clone from it, apply a LUKS2 header,
-     * then resize the clone to the requested size. The inherited (plaintext) template data stays readable
-     * through the clone's encryption, and the clone is a thin CoW image (only the header is written).
+     * as the destination pool: clone a per-template base image that carries LUKS2-header room, apply a
+     * LUKS2 header to the clone, then grow it to the requested size. The base is a dense copy of the
+     * template, not the template itself, because a hole in the parent of an encrypted clone reads as
+     * garbage once a write copies up the object around it. It is built once per template per pool.
      *
      * @return the encrypted CoW clone, or {@code null} if the Ceph operations failed
      */
     private KVMPhysicalDisk createEncryptedRootCoWClone(KVMPhysicalDisk template, KVMStoragePool destPool,
             String newUuid, KVMPhysicalDisk disk, byte[] passphrase) {
-        String luksReservedSnapshotName = rbdTemplateSnapName + "-luks";
+        final String cloneBaseImage = template.getName() + LUKS_CLONE_BASE_SUFFIX;
         Rados radosConnection = null;
         IoCTX ioContext = null;
-        Rbd rbdClient = null;
-        RbdImage templateImage = null;
         try {
             radosConnection = new Rados(destPool.getAuthUserName());
             radosConnection.confSet("mon_host", destPool.getSourceHost() + ":" + destPool.getSourcePort());
@@ -1547,33 +1549,16 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
             radosConnection.confSet("client_mount_timeout", "30");
             radosConnection.connect();
             ioContext = radosConnection.ioCtxCreate(destPool.getSourceDir());
-            rbdClient = new Rbd(ioContext);
-            templateImage = rbdClient.open(template.getName());
-            boolean luksSnapshotExists = false;
-            for (RbdSnapInfo snapshotInfo : templateImage.snapList()) {
-                if (luksReservedSnapshotName.equals(snapshotInfo.name)) {
-                    luksSnapshotExists = true;
-                    break;
-                }
+            Rbd rbdClient = new Rbd(ioContext);
+            if (!isLuksCloneBaseReady(rbdClient, cloneBaseImage)) {
+                buildLuksCloneBase(rbdClient, template, destPool, cloneBaseImage);
             }
-            if (!luksSnapshotExists) {
-                templateImage.resize(template.getVirtualSize() + LUKS2_HEADER_RESERVE_BYTES);
-                templateImage.snapCreate(luksReservedSnapshotName);
-                templateImage.snapProtect(luksReservedSnapshotName);
-                logger.debug("Prepared LUKS-reserved template snapshot {}@{}", template.getName(), luksReservedSnapshotName);
-            }
-            rbdClient.clone(template.getName(), luksReservedSnapshotName, ioContext, newUuid, RBD_FEATURES, rbdOrder);
+            rbdClient.clone(cloneBaseImage, rbdTemplateSnapName, ioContext, newUuid, RBD_FEATURES, rbdOrder);
+            logger.debug("Cloned {}/{}@{} to {}", destPool.getSourceDir(), cloneBaseImage, rbdTemplateSnapName, newUuid);
         } catch (RadosException | RbdException e) {
             logger.error("Failed to create encrypted CoW clone {}: {}", newUuid, e.getMessage());
             return null;
         } finally {
-            if (rbdClient != null && templateImage != null) {
-                try {
-                    rbdClient.close(templateImage);
-                } catch (RbdException ignored) {
-                    // best-effort close of the template handle
-                }
-            }
             if (radosConnection != null && ioContext != null) {
                 radosConnection.ioCtxDestroy(ioContext);
             }
@@ -1587,6 +1572,114 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
         }
         disk.setQemuEncryptFormat(QemuObject.EncryptFormat.LUKS2);
         return disk;
+    }
+
+    /** Does {@code cloneBaseImage} exist with its protected snapshot? It gets its name only once complete. */
+    private boolean isLuksCloneBaseReady(Rbd rbdClient, String cloneBaseImage) {
+        RbdImage image = null;
+        try {
+            image = rbdClient.open(cloneBaseImage);
+            for (RbdSnapInfo snapshotInfo : image.snapList()) {
+                if (rbdTemplateSnapName.equals(snapshotInfo.name)) {
+                    return image.snapIsProtected(snapshotInfo.name);
+                }
+            }
+            return false;
+        } catch (RbdException e) {
+            // not there yet, or not readable: it gets built
+            return false;
+        } finally {
+            if (image != null) {
+                try {
+                    rbdClient.close(image);
+                } catch (RbdException ignored) {
+                    // best-effort close of the base image handle
+                }
+            }
+        }
+    }
+
+    /**
+     * Build the base image: template size plus LUKS2-header room, a dense copy of the template, and a
+     * protected snapshot. It is built under a staging name and renamed at the end, so a half-written
+     * base is never cloned; a host that loses the rename to another one discards its copy.
+     */
+    private void buildLuksCloneBase(Rbd rbdClient, KVMPhysicalDisk template, KVMStoragePool destPool,
+            String cloneBaseImage) throws RbdException {
+        final String stagingImage = cloneBaseImage + "." + UUID.randomUUID();
+        logger.info("Building dense LUKS clone base {}/{} from template {} as {}", destPool.getSourceDir(),
+                cloneBaseImage, template.getName(), stagingImage);
+        rbdClient.create(stagingImage, template.getVirtualSize() + LUKS2_HEADER_RESERVE_BYTES, RBD_FEATURES, rbdOrder);
+        boolean renamed = false;
+        try {
+            new RbdEncryption().copyTemplateDense(destPool.getSourceHost(), destPool.getSourcePort(),
+                    destPool.getAuthUserName(), destPool.getAuthSecret(), destPool.getSourceDir(),
+                    template.getName(), stagingImage);
+            RbdImage stagedImage = rbdClient.open(stagingImage);
+            try {
+                stagedImage.snapCreate(rbdTemplateSnapName);
+                stagedImage.snapProtect(rbdTemplateSnapName);
+            } finally {
+                rbdClient.close(stagedImage);
+            }
+            try {
+                rbdClient.rename(stagingImage, cloneBaseImage);
+                renamed = true;
+                logger.info("Prepared dense LUKS clone base {}/{}", destPool.getSourceDir(), cloneBaseImage);
+            } catch (RbdException e) {
+                logger.info("Another host prepared LUKS clone base {}/{} first; discarding {}",
+                        destPool.getSourceDir(), cloneBaseImage, stagingImage);
+            }
+        } finally {
+            if (!renamed) {
+                removeRbdImageQuietly(rbdClient, stagingImage);
+            }
+        }
+        if (!renamed && !isLuksCloneBaseReady(rbdClient, cloneBaseImage)) {
+            throw new RbdException("LUKS clone base " + destPool.getSourceDir() + "/" + cloneBaseImage
+                    + " could not be prepared and no other host has prepared it");
+        }
+    }
+
+    /** Remove a template's LUKS clone base image along with the template, if it has one. */
+    private void removeLuksCloneBaseIfPresent(Rbd rbdClient, String volumeName) {
+        final String cloneBaseImage = volumeName + LUKS_CLONE_BASE_SUFFIX;
+        RbdImage image;
+        try {
+            image = rbdClient.open(cloneBaseImage);
+        } catch (RbdException e) {
+            // everything that is not a template of an encrypted root has no base image
+            return;
+        }
+        try {
+            rbdClient.close(image);
+        } catch (RbdException ignored) {
+            // best-effort close of the probe handle
+        }
+        logger.info("Removing LUKS clone base image {} along with {}", cloneBaseImage, volumeName);
+        removeRbdImageQuietly(rbdClient, cloneBaseImage);
+    }
+
+    /** Remove an RBD image and its snapshots, logging instead of failing. */
+    private void removeRbdImageQuietly(Rbd rbdClient, String imageName) {
+        try {
+            RbdImage image = rbdClient.open(imageName);
+            try {
+                for (RbdSnapInfo snapshotInfo : image.snapList()) {
+                    if (image.snapIsProtected(snapshotInfo.name)) {
+                        image.snapUnprotect(snapshotInfo.name);
+                    }
+                    image.snapRemove(snapshotInfo.name);
+                }
+            } finally {
+                rbdClient.close(image);
+            }
+            rbdClient.remove(imageName);
+            logger.debug("Removed RBD image {}", imageName);
+        } catch (RbdException e) {
+            // e.g. a base image still has clones of live encrypted roots
+            logger.warn("Could not remove RBD image {}: {}", imageName, e.getMessage());
+        }
     }
 
     /**
