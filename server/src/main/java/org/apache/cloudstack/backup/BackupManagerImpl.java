@@ -2136,7 +2136,7 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
     }
 
     @DB
-    private Date scheduleNextBackupJob(final BackupScheduleVO backupSchedule) {
+    protected Date scheduleNextBackupJob(final BackupScheduleVO backupSchedule) {
         final Date nextTimestamp = DateUtil.getNextRunTime(backupSchedule.getScheduleType(), backupSchedule.getSchedule(),
                 backupSchedule.getTimezone(), currentTimestamp);
         return Transaction.execute(new TransactionCallback<Date>() {
@@ -2150,27 +2150,46 @@ public class BackupManagerImpl extends ManagerBase implements BackupManager {
         });
     }
 
-    private void checkStatusOfCurrentlyExecutingBackups() {
+    protected void checkStatusOfCurrentlyExecutingBackups() {
         final SearchCriteria<BackupScheduleVO> sc = backupScheduleDao.createSearchCriteria();
         sc.addAnd("asyncJobId", SearchCriteria.Op.NNULL);
         final List<BackupScheduleVO> backupSchedules = backupScheduleDao.search(sc, null);
         for (final BackupScheduleVO backupSchedule : backupSchedules) {
-            final Long asyncJobId = backupSchedule.getAsyncJobId();
-            final AsyncJobVO asyncJob = asyncJobManager.getAsyncJob(asyncJobId);
-            switch (asyncJob.getStatus()) {
-                case SUCCEEDED:
-                case FAILED:
-                    final Date nextDateTime = scheduleNextBackupJob(backupSchedule);
-                    final String nextScheduledTime = DateUtil.displayDateInTimezone(DateUtil.GMT_TIMEZONE, nextDateTime);
-                    logger.debug("Next backup scheduled time for Instance ID " + backupSchedule.getVmId() + " is " + nextScheduledTime);
-                    break;
-            default:
-                logger.debug("Found async backup job [id: {}, uuid: {}, vmId: {}] with " +
-                        "status [{}] and cmd information: [cmd: {}, cmdInfo: {}].",
-                        asyncJob.getId(), asyncJob.getUuid(), backupSchedule.getVmId(),
-                        asyncJob.getStatus(), asyncJob.getCmd(), asyncJob.getCmdInfo());
-                break;
+            // One schedule's problem must not stop the others: an exception escaping here ends the whole poll
+            // before scheduleBackups() runs, so every schedule it would have handled silently stops firing.
+            try {
+                checkStatusOfCurrentlyExecutingBackup(backupSchedule);
+            } catch (RuntimeException e) {
+                logger.warn("Could not check the running backup job of schedule {} for Instance ID {}; the other "
+                        + "schedules are checked regardless", backupSchedule.getId(), backupSchedule.getVmId(), e);
             }
+        }
+    }
+
+    private void checkStatusOfCurrentlyExecutingBackup(final BackupScheduleVO backupSchedule) {
+        final Long asyncJobId = backupSchedule.getAsyncJobId();
+        final AsyncJobVO asyncJob = asyncJobManager.getAsyncJob(asyncJobId);
+        if (asyncJob == null) {
+            // Async-job cleanup expunges expired jobs, unfinished ones included, without clearing the schedules
+            // that point at them. Nothing will ever report on this job again; move the schedule on so it fires.
+            logger.warn("Backup schedule {} for Instance ID {} refers to async job {}, which no longer exists; "
+                    + "scheduling its next run", backupSchedule.getId(), backupSchedule.getVmId(), asyncJobId);
+            scheduleNextBackupJob(backupSchedule);
+            return;
+        }
+        switch (asyncJob.getStatus()) {
+            case SUCCEEDED:
+            case FAILED:
+                final Date nextDateTime = scheduleNextBackupJob(backupSchedule);
+                final String nextScheduledTime = DateUtil.displayDateInTimezone(DateUtil.GMT_TIMEZONE, nextDateTime);
+                logger.debug("Next backup scheduled time for Instance ID " + backupSchedule.getVmId() + " is " + nextScheduledTime);
+                break;
+        default:
+            logger.debug("Found async backup job [id: {}, uuid: {}, vmId: {}] with " +
+                    "status [{}] and cmd information: [cmd: {}, cmdInfo: {}].",
+                    asyncJob.getId(), asyncJob.getUuid(), backupSchedule.getVmId(),
+                    asyncJob.getStatus(), asyncJob.getCmd(), asyncJob.getCmdInfo());
+            break;
         }
     }
 
