@@ -63,6 +63,8 @@ import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.impl.ConfigDepotImpl;
 import org.apache.cloudstack.framework.jobs.AsyncJobManager;
+import java.util.Date;
+import org.apache.cloudstack.jobs.JobInfo;
 import org.apache.cloudstack.framework.jobs.impl.AsyncJobVO;
 import org.apache.cloudstack.reservation.ReservationVO;
 import org.apache.cloudstack.reservation.dao.ReservationDao;
@@ -2873,5 +2875,35 @@ public class BackupManagerTest {
         verify(backupManager).validateBackupForZone(zoneId);
         verify(backupOfferingDao).persist(any());
         verify(backupOfferingDetailsDao, never()).saveDetails(any());
+    }
+
+    /**
+     * A schedule whose async job was expunged must not stop the others. Async-job cleanup removes expired jobs,
+     * unfinished ones included, and leaves schedules pointing at them; getAsyncJob() then returns null, and the
+     * null dereference used to end the whole poll before scheduleBackups ran - every schedule handled by that poll
+     * stopped firing until a management server restart cleared the job ids.
+     */
+    @Test
+    public void checkStatusOfCurrentlyExecutingBackupsRepairsAScheduleWhoseJobIsGone() {
+        BackupScheduleVO orphaned = mock(BackupScheduleVO.class);
+        BackupScheduleVO failing = mock(BackupScheduleVO.class);
+        BackupScheduleVO healthy = mock(BackupScheduleVO.class);
+        when(orphaned.getAsyncJobId()).thenReturn(7L);
+        when(failing.getAsyncJobId()).thenReturn(8L);
+        when(healthy.getAsyncJobId()).thenReturn(9L);
+        when(backupScheduleDao.createSearchCriteria()).thenReturn(mock(SearchCriteria.class));
+        when(backupScheduleDao.search(any(), any())).thenReturn(List.of(orphaned, failing, healthy));
+        when(asyncJobManager.getAsyncJob(7L)).thenReturn(null);
+        when(asyncJobManager.getAsyncJob(8L)).thenThrow(new RuntimeException("the job table is unreadable"));
+        AsyncJobVO done = mock(AsyncJobVO.class);
+        when(done.getStatus()).thenReturn(JobInfo.Status.SUCCEEDED);
+        when(asyncJobManager.getAsyncJob(9L)).thenReturn(done);
+        doReturn(new Date()).when(backupManager).scheduleNextBackupJob(any());
+
+        backupManager.checkStatusOfCurrentlyExecutingBackups();
+
+        verify(backupManager).scheduleNextBackupJob(orphaned);
+        verify(backupManager, never()).scheduleNextBackupJob(failing);
+        verify(backupManager).scheduleNextBackupJob(healthy);
     }
 }
