@@ -75,6 +75,7 @@ import com.cloud.agent.api.AgentControlCommand;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.CheckHealthCommand;
 import com.cloud.agent.api.Command;
+import com.cloud.agent.api.MigrateAgentConnectionCommand;
 import com.cloud.agent.api.PingAnswer;
 import com.cloud.agent.api.PingCommand;
 import com.cloud.agent.api.PingRoutingCommand;
@@ -654,6 +655,8 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
 
         final Command[] cmds = checkForCommandsAndTag(commands);
 
+        waitWhileAgentHandoff(hostId, cmds);
+
         //check what agent is returned.
         final AgentAttache agent = getAttache(hostId);
         if (agent == null || agent.isClosed()) {
@@ -703,8 +706,57 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
         return agent;
     }
 
+    /**
+     * A planned agent move (management server maintenance) puts the host into Rebalancing while its agent finishes the
+     * commands it is running and reconnects to another management server. Hold new commands for that host until the
+     * move is over, so they go to the new owner instead of failing with the agent unavailable. The command that moves
+     * the agent is never held.
+     */
+    protected void waitWhileAgentHandoff(final Long hostId, final Command[] cmds) {
+        if (hostId == null || cmds == null) {
+            return;
+        }
+        for (final Command cmd : cmds) {
+            if (cmd instanceof MigrateAgentConnectionCommand) {
+                return;
+            }
+        }
+        HostVO host = _hostDao.findById(hostId);
+        if (host == null || host.getStatus() != Status.Rebalancing) {
+            return;
+        }
+        final long start = System.currentTimeMillis();
+        final long deadline = start + AgentHandoffWait.value() * 1000L;
+        logger.info("Holding {} for {} until its agent has moved to another management server", cmds[0].getClass().getSimpleName(), host);
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(500);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            host = _hostDao.findById(hostId);
+            // Connecting is still part of the move: until the host is Up on its new owner, getAttache() here would not
+            // switch to a forwarding attache and the command would fail with "not in the right state: Connecting".
+            if (host == null || (host.getStatus() != Status.Rebalancing && host.getStatus() != Status.Connecting)) {
+                logger.info("Released {} for {} after {} ms, host is {}", cmds[0].getClass().getSimpleName(), host,
+                        System.currentTimeMillis() - start, host == null ? null : host.getStatus());
+                return;
+            }
+        }
+        logger.warn("{} is still Rebalancing after {} s ({}), sending {} anyway", host, AgentHandoffWait.value(),
+                AgentHandoffWait.key(), cmds[0].getClass().getSimpleName());
+    }
+
+    @Override
+    public boolean isAgentIdle(final long hostId) {
+        final AgentAttache attache = findAttache(hostId);
+        return attache == null || (attache.getQueueSize() == 0 && attache.getNonRecurringListenersSize() == 0);
+    }
+
     @Override
     public long send(final Long hostId, final Commands commands, final Listener listener) throws AgentUnavailableException {
+        waitWhileAgentHandoff(hostId, commands.toCommands());
         final AgentAttache agent = getAttache(hostId);
         if (agent.isClosed()) {
             throw new AgentUnavailableException(String.format(
@@ -1713,7 +1765,8 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
                                     logger.debug("Not processing {} for agent id={}; can't find the host in the DB", PingRoutingCommand.class.getSimpleName(), cmdHostId);
                                 }
                             }
-                            if (host != null && host.getStatus() != Status.Up && gatewayAccessible) {
+                            // A Rebalancing host is moving to another management server; asking for its startup here would pull it back.
+                            if (host != null && host.getStatus() != Status.Up && host.getStatus() != Status.Rebalancing && gatewayAccessible) {
                                 requestStartupCommand = true;
                             }
                             final List<String> avoidMsList = _mshostDao.listNonUpStateMsIPs();
@@ -2134,7 +2187,7 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
         return new ConfigKey<?>[] { CheckTxnBeforeSending, Workers, Port, Wait, AlertWait, DirectAgentLoadSize,
                 DirectAgentPoolSize, DirectAgentThreadCap, EnableKVMAutoEnableDisable, ReadyCommandWait,
                 GranularWaitTimeForCommands, RemoteAgentSslHandshakeTimeout, RemoteAgentMaxConcurrentNewConnections,
-                RemoteAgentNewConnectionsMonitorInterval, KVMHostDiscoverySshPort };
+                RemoteAgentNewConnectionsMonitorInterval, KVMHostDiscoverySshPort, AgentHandoffWait };
     }
 
     protected class SetHostParamsListener implements Listener {
