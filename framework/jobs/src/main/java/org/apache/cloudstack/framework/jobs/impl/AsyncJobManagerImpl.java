@@ -254,21 +254,34 @@ public class AsyncJobManagerImpl extends ManagerBase implements AsyncJobManager,
         throw new CloudRuntimeException("Maintenance or Shutdown has been initiated on this management server. Can not accept new async jobs");
     }
 
-    private boolean checkSyncQueueItemAllowed(SyncQueueItemVO item) {
+    /**
+     * While async jobs are disabled (maintenance or shutdown being prepared), a queued item may still run when it works
+     * for a job that started before that: the same rule as checkAsyncJobAllowed(), which already lets such VmWork jobs
+     * be submitted. Without it, an API job that started just before the drain waits for its VmWork job for ever and the
+     * drain never finishes on a single management server (or on the last one that is Up).
+     */
+    protected boolean checkSyncQueueItemAllowed(SyncQueueItemVO item) {
         if (isAsyncJobsEnabled()) {
             return true;
         }
 
-        Long contentId = item.getContentId();
-        AsyncJob relatedJob = _jobDao.findByIdIncludingRemoved(contentId);
-        if (relatedJob != null) {
-            long relatedJobCreatedTime = relatedJob.getCreated().getTime();
-            if ((asyncJobsDisabledTime - relatedJobCreatedTime) >= 0) {
-                return true;
+        AsyncJob queuedJob = _jobDao.findByIdIncludingRemoved(item.getContentId());
+        if (queuedJob == null) {
+            return false;
+        }
+        return isCreatedBeforeAsyncJobsDisabled(queuedJob);
+    }
+
+    private boolean isCreatedBeforeAsyncJobsDisabled(AsyncJob job) {
+        AsyncJob reference = job;
+        String related = job.getRelated();
+        if (StringUtils.isNotBlank(related)) {
+            AsyncJob relatedJob = _jobDao.findByIdIncludingRemoved(Long.parseLong(related));
+            if (relatedJob != null) {
+                reference = relatedJob;
             }
         }
-
-        return false;
+        return reference.getCreated() != null && (asyncJobsDisabledTime - reference.getCreated().getTime()) >= 0;
     }
 
     @SuppressWarnings("unchecked")
@@ -894,19 +907,29 @@ public class AsyncJobManagerImpl extends ManagerBase implements AsyncJobManager,
 
             protected void reallyRun() {
                 try {
-                    if (!isAsyncJobsEnabled()) {
-                        logger.info("Maintenance or Shutdown has been initiated on this management server. Not executing any async jobs");
-                        return;
-                    }
-
+                    // While maintenance or shutdown is being prepared, only work for jobs that started before that is
+                    // run (checkSyncQueueItemAllowed); everything else goes back to the queue, for another management
+                    // server or for later.
+                    final boolean asyncJobsEnabled = isAsyncJobsEnabled();
                     List<SyncQueueItemVO> l = _queueMgr.dequeueFromAny(getMsid(), MAX_ONETIME_SCHEDULE_SIZE);
                     if (l != null && l.size() > 0) {
                         for (SyncQueueItemVO item : l) {
+                            if (!asyncJobsEnabled && !checkSyncQueueItemAllowed(item)) {
+                                logger.debug("Maintenance or Shutdown has been initiated on this management server, returning sync-queue item {}", item);
+                                _queueMgr.returnItem(item.getId());
+                                continue;
+                            }
                             if (logger.isDebugEnabled()) {
                                 logger.debug("Execute sync-queue item: " + item.toString());
                             }
                             executeQueueItem(item, false);
                         }
+                    }
+
+                    if (!asyncJobsEnabled) {
+                        // wakeupScan() marks the jobs it returns; leave that to after maintenance/shutdown is cancelled,
+                        // as before
+                        return;
                     }
 
                     List<Long> standaloneWakeupJobs = wakeupScan();

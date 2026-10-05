@@ -30,6 +30,8 @@ import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
+import org.apache.cloudstack.framework.jobs.dao.AsyncJobDao;
+import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InjectMocks;
@@ -37,6 +39,8 @@ import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
+
+import java.util.Date;
 
 import static org.mockito.Mockito.when;
 
@@ -55,6 +59,8 @@ public class AsyncJobManagerImplTest {
     NetworkDao networkDao;
     @Mock
     NetworkOrchestrationService networkOrchestrationService;
+    @Mock
+    AsyncJobDao jobDao;
 
     @Test
     public void testCleanupVolumeResource() {
@@ -92,5 +98,48 @@ public class AsyncJobManagerImplTest {
         asyncJobManager.cleanupResources(job);
         Mockito.verify(networkOrchestrationService, Mockito.times(1)).stateTransitTo(networkVO,
                 Network.Event.OperationFailed);
+    }
+
+    private SyncQueueItemVO queueItemFor(long jobId, Date created, Long relatedJobId) {
+        AsyncJobVO job = Mockito.mock(AsyncJobVO.class);
+        Mockito.lenient().when(job.getCreated()).thenReturn(created);
+        Mockito.lenient().when(job.getRelated()).thenReturn(relatedJobId == null ? null : String.valueOf(relatedJobId));
+        when(jobDao.findByIdIncludingRemoved(jobId)).thenReturn(job);
+        SyncQueueItemVO item = new SyncQueueItemVO();
+        item.setContentId(jobId);
+        return item;
+    }
+
+    private void parentJob(long jobId, Date created) {
+        AsyncJobVO parent = Mockito.mock(AsyncJobVO.class);
+        when(parent.getCreated()).thenReturn(created);
+        when(jobDao.findByIdIncludingRemoved(jobId)).thenReturn(parent);
+    }
+
+    @Test
+    public void checkSyncQueueItemAllowedRunsWorkForAJobThatStartedBeforeTheDrain() {
+        long now = System.currentTimeMillis();
+        parentJob(10L, new Date(now - 60_000));
+        SyncQueueItemVO item = queueItemFor(11L, new Date(now + 60_000), 10L);
+        asyncJobManager.disableAsyncJobs();
+        Assert.assertTrue(asyncJobManager.checkSyncQueueItemAllowed(item));
+    }
+
+    @Test
+    public void checkSyncQueueItemAllowedHoldsWorkForAJobThatStartedAfterTheDrain() {
+        long now = System.currentTimeMillis();
+        parentJob(20L, new Date(now + 60_000));
+        SyncQueueItemVO item = queueItemFor(21L, new Date(now + 60_000), 20L);
+        asyncJobManager.disableAsyncJobs();
+        Assert.assertFalse(asyncJobManager.checkSyncQueueItemAllowed(item));
+    }
+
+    @Test
+    public void checkSyncQueueItemAllowedHoldsAJobWithoutParentCreatedAfterTheDrain() {
+        SyncQueueItemVO item = queueItemFor(31L, new Date(System.currentTimeMillis() + 60_000), null);
+        asyncJobManager.disableAsyncJobs();
+        Assert.assertFalse(asyncJobManager.checkSyncQueueItemAllowed(item));
+        asyncJobManager.enableAsyncJobs();
+        Assert.assertTrue(asyncJobManager.checkSyncQueueItemAllowed(item));
     }
 }
