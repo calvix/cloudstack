@@ -493,10 +493,47 @@ public class ClusteredAgentManagerImpl extends AgentManagerImpl implements Clust
         }
     }
 
+    /**
+     * A peer that restarted quickly gets no left/joined event (ClusterManagerImpl only updates its runid), so we keep
+     * a channel the peer process has already closed. The first write to it still succeeds locally and its data is lost;
+     * only the next write fails with "Broken pipe". Peer channels are only ever written to, so a non-blocking read that
+     * returns -1 means the peer has closed this connection. Inbound bytes (e.g. TLS post-handshake messages) are
+     * discarded; nothing unwraps on this channel.
+     */
+    protected boolean isPeerChannelClosed(final SocketChannel ch) {
+        if (ch == null || !ch.isOpen() || !ch.isConnected()) {
+            return true;
+        }
+        if (ch.isBlocking()) {
+            return false;
+        }
+        try {
+            final ByteBuffer discard = ByteBuffer.allocate(4096);
+            int read;
+            while ((read = ch.read(discard)) > 0) {
+                discard.clear();
+            }
+            return read < 0;
+        } catch (final IOException e) {
+            return true;
+        }
+    }
+
     public SocketChannel connectToPeer(final String peerName, final SocketChannel prevCh) {
         synchronized (_peers) {
-            final SocketChannel ch = _peers.get(peerName);
+            SocketChannel ch = _peers.get(peerName);
             SSLEngine sslEngine;
+            if (ch != null && ch != prevCh && isPeerChannelClosed(ch)) {
+                logger.info("Peer management server {} has closed our connection (restarted?), opening a new one", peerName);
+                try {
+                    ch.close();
+                } catch (final IOException e) {
+                    logger.debug("[ignored] failed to close stale peer channel: {}", e.getLocalizedMessage());
+                }
+                _peers.remove(peerName);
+                _sslEngines.remove(peerName);
+                ch = null;
+            }
             if (prevCh != null) {
                 try {
                     prevCh.close();

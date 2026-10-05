@@ -23,6 +23,7 @@ import com.cloud.host.HostVO;
 import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
 import com.cloud.resource.ResourceManagerImpl;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -30,12 +31,16 @@ import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import java.net.InetSocketAddress;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -146,5 +151,32 @@ public class ClusteredAgentManagerImplTest {
         clusteredAgentManagerImpl.scanDirectAgentToLoad();
         verify(clusteredAgentManagerImpl).investigate(agentAttache);
         verify(clusteredAgentManagerImpl).loadDirectlyConnectedHost(hostVO, false);
+    }
+
+    @Test
+    public void isPeerChannelClosedDetectsPeerThatClosedTheConnection() throws Exception {
+        ClusteredAgentManagerImpl clusteredAgentManagerImpl = mock(ClusteredAgentManagerImpl.class);
+        doCallRealMethod().when(clusteredAgentManagerImpl).isPeerChannelClosed(any());
+        try (ServerSocketChannel server = ServerSocketChannel.open()) {
+            server.bind(new InetSocketAddress("127.0.0.1", 0));
+            SocketChannel client = SocketChannel.open(server.getLocalAddress());
+            client.configureBlocking(false);
+            SocketChannel accepted = server.accept();
+
+            Assert.assertFalse("open connection must not be reported closed", clusteredAgentManagerImpl.isPeerChannelClosed(client));
+
+            accepted.close();
+            boolean closed = false;
+            for (int i = 0; i < 50 && !closed; i++) {
+                closed = clusteredAgentManagerImpl.isPeerChannelClosed(client);
+                if (!closed) {
+                    Thread.sleep(20);
+                }
+            }
+            Assert.assertTrue("connection closed by the peer must be detected", closed);
+            client.close();
+            Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(client));
+            Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(null));
+        }
     }
 }
