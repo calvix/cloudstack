@@ -226,6 +226,10 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
     @Inject
     ManagementServiceConfiguration mgmtServiceConf;
 
+    private static final long HANDOFF_POLL_INTERVAL_MS = 500;
+    // Hosts whose agent this management server is handing over to another one (IndirectAgentLBServiceImpl).
+    protected final Set<Long> hostsInHandoff = ConcurrentHashMap.newKeySet();
+
     protected final ConfigKey<Integer> Workers = new ConfigKey<>("Advanced", Integer.class, "workers", "5",
             "Number of worker threads handling remote agent connections.", false);
     protected final ConfigKey<Integer> Port = new ConfigKey<>("Advanced", Integer.class, "port", "8250", "Port to listen on for remote (indirect) agent connections.", false);
@@ -725,12 +729,12 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
         if (host == null || host.getStatus() != Status.Rebalancing) {
             return;
         }
-        final long start = System.currentTimeMillis();
-        final long deadline = start + AgentHandoffWait.value() * 1000L;
+        final long start = System.nanoTime();
+        final long deadline = start + TimeUnit.SECONDS.toNanos(AgentHandoffWait.value());
         logger.info("Holding {} for {} until its agent has moved to another management server", cmds[0].getClass().getSimpleName(), host);
-        while (System.currentTimeMillis() < deadline) {
+        while (System.nanoTime() - deadline < 0) {
             try {
-                Thread.sleep(500);
+                Thread.sleep(HANDOFF_POLL_INTERVAL_MS);
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -740,18 +744,27 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
             // switch to a forwarding attache and the command would fail with "not in the right state: Connecting".
             if (host == null || (host.getStatus() != Status.Rebalancing && host.getStatus() != Status.Connecting)) {
                 logger.info("Released {} for {} after {} ms, host is {}", cmds[0].getClass().getSimpleName(), host,
-                        System.currentTimeMillis() - start, host == null ? null : host.getStatus());
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), host == null ? null : host.getStatus());
                 return;
             }
         }
-        logger.warn("{} is still Rebalancing after {} s ({}), sending {} anyway", host, AgentHandoffWait.value(),
-                AgentHandoffWait.key(), cmds[0].getClass().getSimpleName());
+        logger.warn("{} is still {} after {} s ({}), sending {} anyway", host, host == null ? null : host.getStatus(),
+                AgentHandoffWait.value(), AgentHandoffWait.key(), cmds[0].getClass().getSimpleName());
     }
 
     @Override
     public boolean isAgentIdle(final long hostId) {
         final AgentAttache attache = findAttache(hostId);
-        return attache == null || (attache.getQueueSize() == 0 && attache.getNonRecurringListenersSize() == 0);
+        return attache == null || (attache.getQueueSize() == 0 && !attache.hasNonRecurringListeners());
+    }
+
+    @Override
+    public void setAgentHandoffInProgress(final long hostId, final boolean inProgress) {
+        if (inProgress) {
+            hostsInHandoff.add(hostId);
+        } else {
+            hostsInHandoff.remove(hostId);
+        }
     }
 
     @Override
@@ -1290,7 +1303,8 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
                 return null;
             }
             final Status status = h.getStatus();
-            if (!status.equals(Status.Up) && !status.equals(Status.Connecting)) {
+            // Rebalancing: the agent is being moved to another management server; send() holds the command until then.
+            if (!status.equals(Status.Up) && !status.equals(Status.Connecting) && !status.equals(Status.Rebalancing)) {
                 logger.debug("Can not send command {} due to Host {} not being up", cmd, h);
                 return null;
             }
@@ -1765,8 +1779,10 @@ public class AgentManagerImpl extends ManagerBase implements AgentManager, Handl
                                     logger.debug("Not processing {} for agent id={}; can't find the host in the DB", PingRoutingCommand.class.getSimpleName(), cmdHostId);
                                 }
                             }
-                            // A Rebalancing host is moving to another management server; asking for its startup here would pull it back.
-                            if (host != null && host.getStatus() != Status.Up && host.getStatus() != Status.Rebalancing && gatewayAccessible) {
+                            // A host whose agent this server is handing over is Rebalancing; asking for its startup here would pull it
+                            // back. Any other non-Up host (e.g. stuck after a failed move) still gets the startup request.
+                            final boolean handoffInProgress = host != null && host.getStatus() == Status.Rebalancing && hostsInHandoff.contains(cmdHostId);
+                            if (host != null && host.getStatus() != Status.Up && !handoffInProgress && gatewayAccessible) {
                                 requestStartupCommand = true;
                             }
                             final List<String> avoidMsList = _mshostDao.listNonUpStateMsIPs();

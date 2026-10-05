@@ -500,15 +500,15 @@ public class ClusteredAgentManagerImpl extends AgentManagerImpl implements Clust
      * returns -1 means the peer has closed this connection. Inbound bytes (e.g. TLS post-handshake messages) are
      * discarded; nothing unwraps on this channel.
      */
+    private static final int PEER_CHANNEL_PROBE_BUFFER_SIZE = 1024;
+
     protected boolean isPeerChannelClosed(final SocketChannel ch) {
         if (ch == null || !ch.isOpen() || !ch.isConnected()) {
             return true;
         }
-        if (ch.isBlocking()) {
-            return false;
-        }
         try {
-            final ByteBuffer discard = ByteBuffer.allocate(4096);
+            // connectToPeer() opens peer channels non-blocking, so this read never waits
+            final ByteBuffer discard = ByteBuffer.allocate(PEER_CHANNEL_PROBE_BUFFER_SIZE);
             int read;
             while ((read = ch.read(discard)) > 0) {
                 discard.clear();

@@ -160,21 +160,22 @@ public class ClusteredAgentManagerImplTest {
         try (ServerSocketChannel server = ServerSocketChannel.open()) {
             server.bind(new InetSocketAddress("127.0.0.1", 0));
             SocketChannel client = SocketChannel.open(server.getLocalAddress());
-            client.configureBlocking(false);
-            SocketChannel accepted = server.accept();
+            try (SocketChannel accepted = server.accept()) {
+                client.configureBlocking(false);
+                Assert.assertFalse("open connection must not be reported closed", clusteredAgentManagerImpl.isPeerChannelClosed(client));
 
-            Assert.assertFalse("open connection must not be reported closed", clusteredAgentManagerImpl.isPeerChannelClosed(client));
-
-            accepted.close();
-            boolean closed = false;
-            for (int i = 0; i < 50 && !closed; i++) {
-                closed = clusteredAgentManagerImpl.isPeerChannelClosed(client);
-                if (!closed) {
-                    Thread.sleep(20);
+                accepted.close();
+                boolean closed = false;
+                for (int i = 0; i < 50 && !closed; i++) {
+                    closed = clusteredAgentManagerImpl.isPeerChannelClosed(client);
+                    if (!closed) {
+                        Thread.sleep(20);
+                    }
                 }
+                Assert.assertTrue("connection closed by the peer must be detected", closed);
+            } finally {
+                client.close();
             }
-            Assert.assertTrue("connection closed by the peer must be detected", closed);
-            client.close();
             Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(client));
             Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(null));
         }

@@ -50,6 +50,7 @@ public class AsyncJobDaoImpl extends GenericDaoBase<AsyncJobVO, Long> implements
     private final SearchBuilder<AsyncJobVO> byIdResourceIdResourceTypeSearch;
     private final GenericSearchBuilder<AsyncJobVO, Long> asyncJobTypeSearch;
     private final GenericSearchBuilder<AsyncJobVO, Long> pendingNonPseudoAsyncJobsSearch;
+    private final GenericSearchBuilder<AsyncJobVO, Long> allPendingNonPseudoAsyncJobsSearch;
 
     public AsyncJobDaoImpl() {
         pendingAsyncJobSearch = createSearchBuilder();
@@ -127,6 +128,16 @@ public class AsyncJobDaoImpl extends GenericDaoBase<AsyncJobVO, Long> implements
         pendingNonPseudoAsyncJobsSearch.cp();
         pendingNonPseudoAsyncJobsSearch.cp();
         pendingNonPseudoAsyncJobsSearch.done();
+
+        // Without management server ids: every pending non-pseudo job (the ownership conditions above would otherwise
+        // be dropped from the WHERE clause one by one and leave an invalid "AND OR (...)").
+        allPendingNonPseudoAsyncJobsSearch = createSearchBuilder(Long.class);
+        allPendingNonPseudoAsyncJobsSearch.select(null, SearchCriteria.Func.COUNT, allPendingNonPseudoAsyncJobsSearch.entity().getId());
+        allPendingNonPseudoAsyncJobsSearch.and().op("instanceTypeNULL", allPendingNonPseudoAsyncJobsSearch.entity().getInstanceType(), SearchCriteria.Op.NULL);
+        allPendingNonPseudoAsyncJobsSearch.or("instanceTypeNEQ", allPendingNonPseudoAsyncJobsSearch.entity().getInstanceType(), SearchCriteria.Op.NEQ);
+        allPendingNonPseudoAsyncJobsSearch.cp();
+        allPendingNonPseudoAsyncJobsSearch.and("jobStatusEQ", allPendingNonPseudoAsyncJobsSearch.entity().getStatus(), SearchCriteria.Op.EQ);
+        allPendingNonPseudoAsyncJobsSearch.done();
     }
 
     @Override
@@ -289,10 +300,11 @@ public class AsyncJobDaoImpl extends GenericDaoBase<AsyncJobVO, Long> implements
     // NOTE: This is the msid and NOT the id
     @Override
     public long countPendingNonPseudoJobs(Long... msIds) {
-        SearchCriteria<Long> sc = pendingNonPseudoAsyncJobsSearch.create();
+        final boolean byMsId = msIds != null && msIds.length > 0;
+        SearchCriteria<Long> sc = byMsId ? pendingNonPseudoAsyncJobsSearch.create() : allPendingNonPseudoAsyncJobsSearch.create();
         sc.setParameters("instanceTypeNEQ", AsyncJobVO.PSEUDO_JOB_INSTANCE_TYPE);
         sc.setParameters("jobStatusEQ", JobInfo.Status.IN_PROGRESS);
-        if (msIds != null) {
+        if (byMsId) {
             sc.setParameters("executingMsidIN", (Object[])msIds);
             sc.setParameters("initMsidIN", (Object[])msIds);
         }

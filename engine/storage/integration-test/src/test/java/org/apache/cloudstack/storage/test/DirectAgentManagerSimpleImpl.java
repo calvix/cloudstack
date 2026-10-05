@@ -278,6 +278,10 @@ public class DirectAgentManagerSimpleImpl extends ManagerBase implements AgentMa
     }
 
     @Override
+    public void setAgentHandoffInProgress(long hostId, boolean inProgress) {
+    }
+
+    @Override
     public boolean handleDirectConnectAgent(Host host, StartupCommand[] cmds, ServerResource resource, boolean forRebalance, boolean newHost) throws ConnectionException {
         return false;
     }

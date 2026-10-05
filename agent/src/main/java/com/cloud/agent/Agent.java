@@ -137,7 +137,7 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
     IAgentShell shell;
     NioConnection connection;
     ServerResource serverResource;
-    Link link;
+    volatile Link link;
     Long id;
     String _uuid;
     String _name;
@@ -154,6 +154,9 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
 
     private final AtomicReference<StartupTask> startupTask = new AtomicReference<>();
     private static final long DEFAULT_STARTUP_WAIT = 180;
+    // Longest the agent waits for its running commands before it moves to another management server; the management
+    // server's agent.handoff.wait should not be shorter.
+    private static final int MIGRATE_AGENT_CONNECTION_MAX_WAIT_SECS = 300;
     long startupWait = DEFAULT_STARTUP_WAIT;
     boolean reconnectAllowed = true;
 
@@ -968,8 +971,15 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
                 processManagementServerList(cmd.getMsList(), cmd.getAvoidMsList(), cmd.getLbAlgorithm(), cmd.getLbCheckInterval(), false);
             }
             ScheduledExecutorService migrateAgentConnectionService = Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("MigrateAgentConnection-Job"));
+            final Link linkToMove = link;
             migrateAgentConnectionService.schedule(() -> {
                 waitForCommandsToFinish(MIGRATE_AGENT_CONNECTION_MAX_WAIT_SECS);
+                if (link != linkToMove) {
+                    // The agent reconnected in the meantime (e.g. the management server dropped the link); moving now
+                    // would close the new connection.
+                    logger.info("Agent connection changed while waiting to move it, not moving it again");
+                    return;
+                }
                 migrateAgentConnection(cmd.getAvoidMsList());
             }, 3, TimeUnit.SECONDS);
             migrateAgentConnectionService.shutdown();
@@ -981,8 +991,6 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
         return new MigrateAgentConnectionAnswer(true);
     }
 
-    private static final int MIGRATE_AGENT_CONNECTION_MAX_WAIT_SECS = 300;
-
     /**
      * Answers travel back over the current link, so a command still running or queued when the agent reconnects to
      * another management server would lose its answer and fail there. Wait until nothing has run or been queued for two
@@ -992,14 +1000,20 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
         final long deadline = System.currentTimeMillis() + maxWaitSecs * 1000L;
         int idleChecks = 0;
         while (idleChecks < 2) {
-            final int queued = requestHandler instanceof ThreadPoolExecutor ? ((ThreadPoolExecutor)requestHandler).getQueue().size() : 0;
-            idleChecks = (commandsInProgress.get() == 0 && queued == 0) ? idleChecks + 1 : 0;
+            int queued = 0;
+            int active = 0;
+            if (requestHandler instanceof ThreadPoolExecutor) {
+                // getActiveCount() also covers a request that has left the queue but not yet incremented commandsInProgress
+                queued = ((ThreadPoolExecutor)requestHandler).getQueue().size();
+                active = ((ThreadPoolExecutor)requestHandler).getActiveCount();
+            }
+            idleChecks = (commandsInProgress.get() == 0 && queued == 0 && active == 0) ? idleChecks + 1 : 0;
             if (idleChecks >= 2) {
                 break;
             }
             if (System.currentTimeMillis() >= deadline) {
-                logger.warn("Moving the agent connection with {} commands still in progress and {} queued after {} s",
-                        commandsInProgress.get(), queued, maxWaitSecs);
+                logger.warn("Moving the agent connection with {} commands still in progress, {} running and {} queued after {} s",
+                        commandsInProgress.get(), active, queued, maxWaitSecs);
                 return;
             }
             try {

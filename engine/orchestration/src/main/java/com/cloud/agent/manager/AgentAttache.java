@@ -275,6 +275,19 @@ public abstract class AgentAttache {
         return _requests.size();
     }
 
+    /**
+     * @return true when a command sent to this agent is still waiting for its answer (same check as
+     * getNonRecurringListenersSize() > 0, without logging every listener)
+     */
+    public boolean hasNonRecurringListeners() {
+        for (final Listener listener : _waitForList.values()) {
+            if (!listener.isRecurring()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public int getNonRecurringListenersSize() {
         List<Listener> nonRecurringListenersList = new ArrayList<Listener>();
         if (_waitForList.isEmpty()) {
