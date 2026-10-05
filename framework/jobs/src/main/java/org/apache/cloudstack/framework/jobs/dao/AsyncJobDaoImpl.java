@@ -113,9 +113,20 @@ public class AsyncJobDaoImpl extends GenericDaoBase<AsyncJobVO, Long> implements
 
         pendingNonPseudoAsyncJobsSearch = createSearchBuilder(Long.class);
         pendingNonPseudoAsyncJobsSearch.select(null, SearchCriteria.Func.COUNT, pendingNonPseudoAsyncJobsSearch.entity().getId());
-        pendingNonPseudoAsyncJobsSearch.and("instanceTypeNEQ", pendingNonPseudoAsyncJobsSearch.entity().getInstanceType(), SearchCriteria.Op.NEQ);
+        // VmWork jobs carry a NULL instance_type; "NEQ 'Thread'" alone would skip them (NULL != x is not true in SQL),
+        // and the maintenance drain would then finish while VM work still runs on this management server.
+        pendingNonPseudoAsyncJobsSearch.and().op("instanceTypeNULL", pendingNonPseudoAsyncJobsSearch.entity().getInstanceType(), SearchCriteria.Op.NULL);
+        pendingNonPseudoAsyncJobsSearch.or("instanceTypeNEQ", pendingNonPseudoAsyncJobsSearch.entity().getInstanceType(), SearchCriteria.Op.NEQ);
+        pendingNonPseudoAsyncJobsSearch.cp();
         pendingNonPseudoAsyncJobsSearch.and("jobStatusEQ", pendingNonPseudoAsyncJobsSearch.entity().getStatus(), SearchCriteria.Op.EQ);
-        pendingNonPseudoAsyncJobsSearch.and("executingMsidIN", pendingNonPseudoAsyncJobsSearch.entity().getExecutingMsid(), SearchCriteria.Op.IN);
+        // Same ownership rule as the jobs a restarting management server fails (getResetJobs): executing here, or
+        // queued here and not picked up yet.
+        pendingNonPseudoAsyncJobsSearch.and().op("executingMsidIN", pendingNonPseudoAsyncJobsSearch.entity().getExecutingMsid(), SearchCriteria.Op.IN);
+        pendingNonPseudoAsyncJobsSearch.or().op("executingMsidNULL", pendingNonPseudoAsyncJobsSearch.entity().getExecutingMsid(), SearchCriteria.Op.NULL);
+        pendingNonPseudoAsyncJobsSearch.and("initMsidIN", pendingNonPseudoAsyncJobsSearch.entity().getInitMsid(), SearchCriteria.Op.IN);
+        pendingNonPseudoAsyncJobsSearch.cp();
+        pendingNonPseudoAsyncJobsSearch.cp();
+        pendingNonPseudoAsyncJobsSearch.done();
     }
 
     @Override
@@ -283,6 +294,7 @@ public class AsyncJobDaoImpl extends GenericDaoBase<AsyncJobVO, Long> implements
         sc.setParameters("jobStatusEQ", JobInfo.Status.IN_PROGRESS);
         if (msIds != null) {
             sc.setParameters("executingMsidIN", (Object[])msIds);
+            sc.setParameters("initMsidIN", (Object[])msIds);
         }
         List<Long> results = customSearch(sc, null);
         return results.get(0);
