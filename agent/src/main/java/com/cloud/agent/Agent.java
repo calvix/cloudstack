@@ -969,6 +969,7 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
             }
             ScheduledExecutorService migrateAgentConnectionService = Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("MigrateAgentConnection-Job"));
             migrateAgentConnectionService.schedule(() -> {
+                waitForCommandsToFinish(MIGRATE_AGENT_CONNECTION_MAX_WAIT_SECS);
                 migrateAgentConnection(cmd.getAvoidMsList());
             }, 3, TimeUnit.SECONDS);
             migrateAgentConnectionService.shutdown();
@@ -978,6 +979,37 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
             return new MigrateAgentConnectionAnswer(errMsg);
         }
         return new MigrateAgentConnectionAnswer(true);
+    }
+
+    private static final int MIGRATE_AGENT_CONNECTION_MAX_WAIT_SECS = 300;
+
+    /**
+     * Answers travel back over the current link, so a command still running or queued when the agent reconnects to
+     * another management server would lose its answer and fail there. Wait until nothing has run or been queued for two
+     * consecutive checks; the management server holds new commands for this host while it is Rebalancing.
+     */
+    private void waitForCommandsToFinish(final int maxWaitSecs) {
+        final long deadline = System.currentTimeMillis() + maxWaitSecs * 1000L;
+        int idleChecks = 0;
+        while (idleChecks < 2) {
+            final int queued = requestHandler instanceof ThreadPoolExecutor ? ((ThreadPoolExecutor)requestHandler).getQueue().size() : 0;
+            idleChecks = (commandsInProgress.get() == 0 && queued == 0) ? idleChecks + 1 : 0;
+            if (idleChecks >= 2) {
+                break;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                logger.warn("Moving the agent connection with {} commands still in progress and {} queued after {} s",
+                        commandsInProgress.get(), queued, maxWaitSecs);
+                return;
+            }
+            try {
+                Thread.sleep(1000);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        logger.info("No commands in progress, moving the agent connection");
     }
 
     private void migrateAgentConnection(List<String> avoidMsList) {

@@ -54,6 +54,10 @@ public interface AgentManager {
             "This timeout overrides the wait global config. This holds a comma separated key value pairs containing timeout (in seconds) for specific commands. " +
                     "For example: DhcpEntryCommand=600, SavePasswordCommand=300, VmDataCommand=300", false);
 
+    ConfigKey<Integer> AgentHandoffWait = new ConfigKey<>("Advanced", Integer.class, "agent.handoff.wait", "180",
+            "Seconds a command to a host waits while the host's agent is moved to another management server (host in Rebalancing), "
+                    + "instead of failing with the agent unavailable. After that the command is sent as before.", true);
+
     ConfigKey<Integer> KVMHostDiscoverySshPort = new ConfigKey<>(ConfigKey.CATEGORY_ADVANCED, Integer.class,
             "kvm.host.discovery.ssh.port", String.valueOf(Host.DEFAULT_SSH_PORT), "SSH port used for KVM host discovery and any other operations on host (using SSH)." +
                 " Please note that this is applicable when port is not defined through host url while adding the KVM host.", true, ConfigKey.Scope.Cluster);
@@ -154,6 +158,11 @@ public interface AgentManager {
     public boolean agentStatusTransitTo(HostVO host, Status.Event e, long msId);
 
     boolean isAgentAttached(long hostId);
+
+    /**
+     * @return true when no command sent from this management server to the host is queued or waiting for its answer
+     */
+    boolean isAgentIdle(long hostId);
 
     void disconnectWithoutInvestigation(long hostId, Status.Event event);
 

@@ -50,8 +50,11 @@ import com.cloud.dc.DataCenter;
 import com.cloud.dc.DataCenterVO;
 import com.cloud.dc.dao.ClusterDao;
 import com.cloud.dc.dao.DataCenterDao;
+import com.cloud.exception.AgentUnavailableException;
+import com.cloud.exception.OperationTimedoutException;
 import com.cloud.host.Host;
 import com.cloud.host.HostVO;
+import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.resource.ResourceState;
@@ -72,6 +75,18 @@ public class IndirectAgentLBServiceImpl extends ComponentLifecycleBase implement
             "The interval in seconds after which indirect agent should check and try to connect to its preferred host (the first management server from the propagated list provided in the 'host' config)." +
                     " Set 0 to disable it.",
             true, ConfigKey.Scope.Cluster);
+
+    public static final ConfigKey<Integer> IndirectAgentMigrationParallelism = new ConfigKey<>("Advanced", Integer.class,
+            "indirect.agent.migration.parallelism", "1",
+            "How many indirect agents a management server going into maintenance moves to other management servers at the same time. "
+                    + "A host is Rebalancing while its agent moves and the deployment planner skips it, so keep this low.",
+            true);
+
+    public static final ConfigKey<Integer> IndirectAgentMigrationIdleWait = new ConfigKey<>("Advanced", Integer.class,
+            "indirect.agent.migration.idle.wait", "600",
+            "Seconds to wait, before an indirect agent is moved to another management server, for the commands this management "
+                    + "server already sent to it to finish. When they do not finish in time, the agent is not moved and maintenance is not prepared.",
+            true);
 
     private static Map<String, org.apache.cloudstack.agent.lb.IndirectAgentLBAlgorithm> algorithmMap = new HashMap<>();
 
@@ -478,7 +493,7 @@ public class IndirectAgentLBServiceImpl extends ComponentLifecycleBase implement
         }
         logger.debug(String.format("Migrating %d indirect routing host agents from management server node %d (id: %s) of zone %s, " +
                 "cluster ID: %d", agentBasedHostsOfMsInDcAndCluster.size(), fromMsId, fromMsUuid, dc, clusterId));
-        ExecutorService migrateAgentsExecutorService = Executors.newFixedThreadPool(10, new NamedThreadFactory("MigrateRoutingHostAgent-Worker"));
+        ExecutorService migrateAgentsExecutorService = Executors.newFixedThreadPool(Math.max(1, IndirectAgentMigrationParallelism.value()), new NamedThreadFactory("MigrateRoutingHostAgent-Worker"));
         Long lbCheckInterval = getLBPreferredHostCheckInterval(clusterId);
         boolean stopMigration = false;
         for (final Long hostId : agentBasedHostsOfMsInDcAndCluster) {
@@ -595,17 +610,89 @@ public class IndirectAgentLBServiceImpl extends ComponentLifecycleBase implement
                     msList = getManagementServerList(hostId, dcId, orderedHostIdList, lbAlgorithm);
                 }
 
+                // Planned move: Rebalancing holds new commands for this host (AgentManagerImpl.waitWhileAgentHandoff) and
+                // keeps the disconnect from turning the host Alert and starting an HA investigation.
+                final HostVO host = hostDao.findById(hostId);
+                final boolean handoff = host != null && host.getStatus() == Status.Up
+                        && agentManager.agentStatusTransitTo(host, Status.Event.StartAgentRebalance, fromMsId);
+                if (handoff && !waitFor(() -> agentManager.isAgentIdle(hostId), IndirectAgentMigrationIdleWait.value())) {
+                    logger.warn(String.format("Commands to host agent ID: %d did not finish in %d s, not moving its agent", hostId, IndirectAgentMigrationIdleWait.value()));
+                    abortHandoff(hostId, fromMsId);
+                    return;
+                }
+
                 final MigrateAgentConnectionCommand cmd = new MigrateAgentConnectionCommand(msList, avoidMsList, lbAlgorithm, lbCheckInterval);
                 cmd.setWait(60);
-                final Answer answer = agentManager.easySend(hostId, cmd); //may not receive answer when the agent disconnects immediately and try reconnecting to other ms host
+                // easySend() refuses hosts that are not Up/Connecting, and the host is Rebalancing now; send() has no
+                // such check, and AgentManagerImpl.waitWhileAgentHandoff() never holds this command.
+                final Answer answer = sendMigrateCommand(hostId, cmd); //may not receive answer when the agent disconnects immediately and try reconnecting to other ms host
                 if (answer == null) {
                     logger.warn(String.format("Got empty answer while initiating migration of agent connection for host agent ID: %d", hostId));
                 } else if (!answer.getResult()) {
                     logger.warn(String.format("Error while initiating migration of agent connection for host agent ID: %d - %s", hostId, answer.getDetails()));
+                    if (handoff) {
+                        abortHandoff(hostId, fromMsId);
+                        return;
+                    }
                 }
                 updateLastManagementServer(hostId, fromMsId);
+                if (handoff && !waitFor(() -> isHostUpElsewhere(hostId, fromMsId), AgentManager.AgentHandoffWait.value())) {
+                    logger.warn(String.format("Host agent ID: %d is not Up on another management server %d s after its agent was asked to move, letting it reconnect", hostId, AgentManager.AgentHandoffWait.value()));
+                    abortHandoff(hostId, fromMsId);
+                }
             } catch (final Exception e) {
                 logger.error(String.format("Error migrating agent connection for host %d", hostId), e);
+            }
+        }
+    }
+
+    private Answer sendMigrateCommand(final long hostId, final MigrateAgentConnectionCommand cmd) {
+        try {
+            return agentManager.send(hostId, cmd);
+        } catch (final AgentUnavailableException | OperationTimedoutException e) {
+            logger.warn(String.format("Unable to send %s to host agent ID: %d: %s", cmd.getClass().getSimpleName(), hostId, e.getMessage()));
+            return null;
+        }
+    }
+
+    private boolean waitFor(final java.util.function.BooleanSupplier condition, final long timeoutSecs) {
+        final long deadline = System.currentTimeMillis() + timeoutSecs * 1000L;
+        while (!condition.getAsBoolean()) {
+            if (System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(500);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isHostUpElsewhere(final long hostId, final long fromMsId) {
+        final HostVO host = hostDao.findById(hostId);
+        return host == null || (host.getStatus() == Status.Up && host.getManagementServerId() != null && host.getManagementServerId() != fromMsId);
+    }
+
+    /**
+     * The agent did not move. There is no Rebalancing -> Up transition, so let it reconnect: reconnect() accepts a
+     * Rebalancing host (ShutdownRequested -> Disconnected, then Connecting -> Up), without an investigation. Only if that
+     * fails, mark the move failed (Disconnected); the agent's next ping brings the host back Up.
+     */
+    private void abortHandoff(final long hostId, final long fromMsId) {
+        final HostVO host = hostDao.findById(hostId);
+        if (host == null || host.getStatus() != Status.Rebalancing) {
+            return;
+        }
+        try {
+            agentManager.reconnect(hostId);
+        } catch (final AgentUnavailableException | RuntimeException e) {
+            logger.warn(String.format("Unable to reconnect host agent ID: %d after an aborted move: %s", hostId, e.getMessage()));
+            final HostVO current = hostDao.findById(hostId);
+            if (current != null && current.getStatus() == Status.Rebalancing) {
+                agentManager.agentStatusTransitTo(current, Status.Event.RebalanceFailed, fromMsId);
             }
         }
     }
@@ -645,7 +732,9 @@ public class IndirectAgentLBServiceImpl extends ComponentLifecycleBase implement
     public ConfigKey<?>[] getConfigKeys() {
         return new ConfigKey<?>[] {
                 IndirectAgentLBAlgorithm,
-                IndirectAgentLBCheckInterval
+                IndirectAgentLBCheckInterval,
+                IndirectAgentMigrationParallelism,
+                IndirectAgentMigrationIdleWait
         };
     }
 }

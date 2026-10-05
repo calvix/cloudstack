@@ -273,6 +273,11 @@ public class DirectAgentManagerSimpleImpl extends ManagerBase implements AgentMa
     }
 
     @Override
+    public boolean isAgentIdle(long hostId) {
+        return true;
+    }
+
+    @Override
     public boolean handleDirectConnectAgent(Host host, StartupCommand[] cmds, ServerResource resource, boolean forRebalance, boolean newHost) throws ConnectionException {
         return false;
     }
