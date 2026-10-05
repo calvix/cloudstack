@@ -647,7 +647,7 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
         if (org.apache.commons.lang3.StringUtils.isBlank(host)) {
             host = shell.getNextHost();
         }
-        List<String> avoidMSHostList = shell.getAvoidHosts();
+        List<String> avoidMSHostList = getHostsToAvoidOnReconnect(shell.getHosts(), shell.getAvoidHosts());
         do {
             if (CollectionUtils.isEmpty(avoidMSHostList) || !avoidMSHostList.contains(host)) {
                 connection = new NioClient(getAgentName(), host, shell.getPort(), shell.getWorkers(), shell.getSslHandshakeTimeout(), this);
@@ -664,6 +664,23 @@ public class Agent implements HandlerFactory, IAgentControl, AgentStatusUpdater 
         } while (!connection.isStartup());
         shell.updateConnectedHost(((NioClient)connection).getHost());
         logger.info("Connected to the host: {}", shell.getConnectedHost());
+    }
+
+    /**
+     * The avoid list comes from the last ping answer: management servers that were not Up then (e.g. preparing for
+     * maintenance or shutdown). If it covers every management server the agent knows, skipping them all would make the
+     * reconnect loop below wait for ever without trying anything (single management server, or all of them restarted).
+     * Then try them anyway.
+     */
+    protected List<String> getHostsToAvoidOnReconnect(final String[] msHosts, final List<String> avoidMsHosts) {
+        if (CollectionUtils.isEmpty(avoidMsHosts) || msHosts == null || msHosts.length == 0) {
+            return avoidMsHosts;
+        }
+        if (avoidMsHosts.containsAll(Arrays.asList(msHosts))) {
+            logger.info("All management servers {} are on the avoid list {}, trying them anyway", Arrays.toString(msHosts), avoidMsHosts);
+            return new ArrayList<>();
+        }
+        return avoidMsHosts;
     }
 
     protected void closeAndTerminateLink(final Link link) {

@@ -31,6 +31,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.net.InetSocketAddress;
 
 import javax.naming.ConfigurationException;
@@ -253,5 +256,25 @@ public class AgentTest {
         verify(mockConnection).stop();
         verify(mockConnection).cleanUp();
         verify(mockBackoff, times(3)).waitBeforeRetry();
+    }
+
+    @Test
+    public void reconnectTriesAllManagementServersWhenEveryOneIsOnTheAvoidList() {
+        List<String> avoid = agent.getHostsToAvoidOnReconnect(new String[]{"10.0.0.1"}, Arrays.asList("10.0.0.1"));
+        assertTrue("a single, avoided management server must still be tried", avoid.isEmpty());
+        avoid = agent.getHostsToAvoidOnReconnect(new String[]{"10.0.0.1", "10.0.0.2"}, Arrays.asList("10.0.0.2", "10.0.0.1"));
+        assertTrue(avoid.isEmpty());
+    }
+
+    @Test
+    public void reconnectKeepsAvoidingWhenAnotherManagementServerIsAvailable() {
+        List<String> avoid = Arrays.asList("10.0.0.1");
+        assertEquals(avoid, agent.getHostsToAvoidOnReconnect(new String[]{"10.0.0.1", "10.0.0.2"}, avoid));
+    }
+
+    @Test
+    public void reconnectWithoutAvoidListAvoidsNothing() {
+        assertTrue(agent.getHostsToAvoidOnReconnect(new String[]{"10.0.0.1"}, Collections.emptyList()).isEmpty());
+        assertEquals(null, agent.getHostsToAvoidOnReconnect(new String[]{"10.0.0.1"}, null));
     }
 }
