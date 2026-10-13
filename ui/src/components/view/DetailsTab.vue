@@ -65,7 +65,7 @@
           <div v-else-if="$route.meta.name === 'backup' && item === 'volumes'">
             <div v-for="(volume, idx) in JSON.parse(dataResource[item])" :key="idx">
               <router-link v-if="!dataResource['vmbackupofferingremoved']" :to="{ path: '/volume/' + volume.uuid }">{{ volume.type }} - {{ volume.path }}</router-link>
-              <span v-else>{{ volume.type }} - {{ volume.path }}</span> ({{ parseFloat(volume.size / (1024.0 * 1024.0 * 1024.0)).toFixed(1) }} GB)
+              <span v-else>{{ volume.type }} - {{ volume.path }}</span> ({{ parseFloat(volume.size / (1024.0 * 1024.0 * 1024.0)).toFixed(1) }} GiB)
             </div>
           </div>
           <div v-else-if="$route.meta.name === 'computeoffering' && item === 'rootdisksize'">
@@ -381,7 +381,17 @@ export default {
       }
       return null
     },
+    isNetrisNetwork () {
+      if (!this.resource.service) {
+        return false
+      }
+      const networkAclService = this.resource.service.find(svc => svc.name === 'NetworkACL')
+      return networkAclService && networkAclService.provider && networkAclService.provider.some(p => p.name === 'Netris')
+    },
     ip4routes () {
+      if (this.isNetrisNetwork) {
+        return null
+      }
       if (this.resource.ip4routes && this.resource.ip4routes.length > 0) {
         var routes = []
         for (var route of this.resource.ip4routes) {
@@ -392,6 +402,9 @@ export default {
       return null
     },
     ip6routes () {
+      if (this.isNetrisNetwork) {
+        return null
+      }
       if (this.resource.ip6routes && this.resource.ip6routes.length > 0) {
         var routes = []
         for (var route of this.resource.ip6routes) {
