@@ -1672,7 +1672,7 @@ public class KVMStorageProcessor implements StorageProcessor {
             } else {
                 DiskDef.DiskBus busT = getAttachDiskBusType(devId, disks, controllerInfo);
                 diskdef = new DiskDef();
-                if (busT == DiskDef.DiskBus.SCSI || busT == DiskDef.DiskBus.VIRTIOBLK) {
+                if (busT == DiskDef.DiskBus.SCSI) {
                     diskdef.setQemuDriver(true);
                     diskdef.setDiscard(DiscardType.UNMAP);
                 }
@@ -1768,6 +1768,7 @@ public class KVMStorageProcessor implements StorageProcessor {
                 }
                 diskdef.setPhysicalBlockIOSize(attachingPool.getSupportedPhysicalBlockSize());
                 diskdef.setLogicalBlockIOSize(attachingPool.getSupportedLogicalBlockSize());
+                resource.applyDiskDiscardDetail(diskdef, details);
                 attachingPool.customizeLibvirtDiskDef(diskdef);
             }
 
@@ -1794,8 +1795,6 @@ public class KVMStorageProcessor implements StorageProcessor {
             }
             if (disk.getBusType() == DiskDef.DiskBus.SCSI) {
                 return DiskDef.DiskBus.SCSI;
-            } else if (disk.getBusType() == DiskDef.DiskBus.VIRTIOBLK) {
-                return DiskDef.DiskBus.VIRTIOBLK;
             }
         }
         return DiskDef.DiskBus.VIRTIO;

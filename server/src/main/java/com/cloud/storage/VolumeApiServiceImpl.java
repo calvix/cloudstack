@@ -5169,6 +5169,11 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
                     details.put(VmDetailConstants.IO_POLICY, ioPolicy);
                 }
 
+                String diskDiscard = getDiskDiscard(vm);
+                if (diskDiscard != null) {
+                    details.put(VmDetailConstants.DISK_DISCARD, diskDiscard);
+                }
+
                 if (chapInfo != null) {
                     details.put(DiskTO.CHAP_INITIATOR_USERNAME, chapInfo.getInitiatorUsername());
                     details.put(DiskTO.CHAP_INITIATOR_SECRET, chapInfo.getInitiatorSecret());
@@ -5292,6 +5297,13 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         return vm.getHypervisorType() == HypervisorType.KVM
                 && vm.getDetails() != null
                 && vm.getDetail(VmDetailConstants.IOTHREADS) != null;
+    }
+
+    private String getDiskDiscard(UserVmVO vm) {
+        if (vm.getHypervisorType() != HypervisorType.KVM || vm.getDetails() == null) {
+            return null;
+        }
+        return vm.getDetail(VmDetailConstants.DISK_DISCARD);
     }
 
     private String getIoPolicy(UserVmVO vm, long poolId) {
