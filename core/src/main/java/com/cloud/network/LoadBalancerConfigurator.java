@@ -24,6 +24,7 @@ import java.util.List;
 import com.cloud.agent.api.routing.LoadBalancerConfigCommand;
 import com.cloud.agent.api.to.PortForwardingRuleTO;
 import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.SslCertEntry;
+import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.UdpLbEntry;
 
 public interface LoadBalancerConfigurator {
     public final static int ADD = 0;
@@ -37,4 +38,6 @@ public interface LoadBalancerConfigurator {
     public String[][] generateFwRules(LoadBalancerConfigCommand lbCmd);
 
     public SslCertEntry[] generateSslCertEntries(LoadBalancerConfigCommand lbCmd);
+
+    public UdpLbEntry[] generateUdpEntries(LoadBalancerConfigCommand lbCmd);
 }

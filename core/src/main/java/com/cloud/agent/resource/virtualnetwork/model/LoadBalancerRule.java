@@ -26,6 +26,7 @@ public class LoadBalancerRule {
     private String tmpCfgFilePath;
     private String tmpCfgFileName;
     private SslCertEntry[] sslCerts;
+    private UdpLbEntry[] udpRules;
 
     private String[] addRules;
     private String[] removeRules;
@@ -77,6 +78,50 @@ public class LoadBalancerRule {
         }
         public String getPassword() {
             return password;
+        }
+    }
+
+    /**
+     * A UDP load balancer rule. The router serves it with IPVS (NAT mode), not haproxy.
+     */
+    public static class UdpLbEntry {
+        private String sourceIp;
+        private int sourcePort;
+        // IPVS scheduler: rr, lc or sh
+        private String scheduler;
+        // IPVS persistence timeout in seconds, 0 = none
+        private int persistence;
+        // "ip:port" of each backend
+        private String[] destinations;
+        // allowed source CIDRs, empty = everyone
+        private String[] cidrs;
+
+        public UdpLbEntry(String sourceIp, int sourcePort, String scheduler, int persistence, String[] destinations, String[] cidrs) {
+            this.sourceIp = sourceIp;
+            this.sourcePort = sourcePort;
+            this.scheduler = scheduler;
+            this.persistence = persistence;
+            this.destinations = destinations;
+            this.cidrs = cidrs;
+        }
+
+        public String getSourceIp() {
+            return sourceIp;
+        }
+        public int getSourcePort() {
+            return sourcePort;
+        }
+        public String getScheduler() {
+            return scheduler;
+        }
+        public int getPersistence() {
+            return persistence;
+        }
+        public String[] getDestinations() {
+            return destinations;
+        }
+        public String[] getCidrs() {
+            return cidrs;
         }
     }
 
@@ -156,5 +201,13 @@ public class LoadBalancerRule {
 
     public void setSslCerts(final SslCertEntry[] sslCerts) {
         this.sslCerts = sslCerts;
+    }
+
+    public UdpLbEntry[] getUdpRules() {
+        return udpRules;
+    }
+
+    public void setUdpRules(final UdpLbEntry[] udpRules) {
+        this.udpRules = udpRules;
     }
 }

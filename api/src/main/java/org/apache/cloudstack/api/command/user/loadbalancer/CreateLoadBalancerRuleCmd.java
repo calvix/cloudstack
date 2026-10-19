@@ -327,6 +327,10 @@ public class CreateLoadBalancerRuleCmd extends BaseAsyncCreateCmd /*implements L
     }
 
     public String getProtocol() {
+        // a UDP load balancer needs a UDP firewall rule and must not clash with UDP port forwarding on the same port
+        if (NetUtils.UDP_PROTO.equals(getLbProtocol())) {
+            return NetUtils.UDP_PROTO;
+        }
         return NetUtils.TCP_PROTO;
     }
 

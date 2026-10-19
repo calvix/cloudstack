@@ -28,6 +28,10 @@ HAPROXY_CONF_P = "/etc/haproxy/haproxy.cfg"
 
 SSL_CERTS_DIR = "/etc/cloudstack/ssl/"
 
+# matches "-A -u 1.2.3.4:53 -s rr -p 300" and "-a -u 1.2.3.4:53 -r 10.1.1.5:53 -m -w 1" from ipvsadm-save -n
+IPVS_SERVICE_RE = re.compile(r"^-A -u (\S+) -s (\S+)(?: -p (\d+))?")
+IPVS_DEST_RE = re.compile(r"^-a -u (\S+) -r (\S+)")
+
 class CsLoadBalancer(CsDataBag):
     """ Manage Load Balancer entries """
 
@@ -68,6 +72,9 @@ class CsLoadBalancer(CsDataBag):
         stat_rules = self.dbag['config'][0]['stat_rules']
         self._configure_firewall(add_rules, remove_rules, stat_rules)
 
+        udp_rules = self.dbag['config'][0].get('udp_rules', [])
+        self._configure_udp(udp_rules)
+
     def _configure_firewall(self, add_rules, remove_rules, stat_rules):
         firewall = self.config.get_fw()
 
@@ -92,6 +99,69 @@ class CsLoadBalancer(CsDataBag):
             ip = path[0]
             port = path[1]
             firewall.append(["filter", "", "-A INPUT -p tcp -m tcp -d %s --dport %s -m state --state NEW -j ACCEPT" % (ip, port)])
+
+    def _configure_udp(self, udp_rules):
+        """ UDP rules are served by IPVS in NAT mode: the router is the gateway of the
+        backends, so their replies come back through it and get the public address back. """
+        firewall = self.config.get_fw()
+        wanted = {}
+        for rule in udp_rules:
+            vip = "%s:%s" % (rule['source_ip'], rule['source_port'])
+            wanted[vip] = rule
+            cidrs = [c for c in rule.get('cidrs', []) if c and c != "0.0.0.0/0"]
+            for cidr in cidrs or [None]:
+                source = "-s %s " % cidr if cidr else ""
+                firewall.append(["filter", "", "-A INPUT %s-p udp -m udp -d %s --dport %s -m state --state NEW -j ACCEPT" %
+                                 (source, rule['source_ip'], rule['source_port'])])
+
+        current_services, current_dests = self._get_ipvs_udp()
+        if not wanted and not current_services:
+            return
+
+        CsHelper.execute("modprobe ip_vs")
+        # let netfilter track IPVS connections, so the replies pass the router's stateful rules
+        CsHelper.execute("sysctl -w net.ipv4.vs.conntrack=1")
+        CsHelper.execute("sysctl -w net.ipv4.vs.expire_nodest_conn=1")
+
+        for vip in current_services:
+            if vip not in wanted:
+                logging.info("CsLoadBalancer:: removing UDP service %s" % vip)
+                CsHelper.execute("ipvsadm -D -u %s" % vip)
+
+        for vip, rule in wanted.items():
+            options = "-s %s" % rule['scheduler']
+            if int(rule.get('persistence', 0)) > 0:
+                options += " -p %s" % rule['persistence']
+            if vip not in current_services:
+                logging.info("CsLoadBalancer:: adding UDP service %s %s" % (vip, options))
+                CsHelper.execute("ipvsadm -A -u %s %s" % (vip, options))
+            elif current_services[vip] != (rule['scheduler'], int(rule.get('persistence', 0))):
+                logging.info("CsLoadBalancer:: changing UDP service %s to %s" % (vip, options))
+                CsHelper.execute("ipvsadm -E -u %s %s" % (vip, options))
+
+            dests = set(rule.get('destinations', []))
+            have = current_dests.get(vip, set())
+            for dest in have - dests:
+                CsHelper.execute("ipvsadm -d -u %s -r %s" % (vip, dest))
+            for dest in dests - have:
+                CsHelper.execute("ipvsadm -a -u %s -r %s -m" % (vip, dest))
+
+    def _get_ipvs_udp(self):
+        """ Returns the UDP services in IPVS as {vip: (scheduler, persistence)} and {vip: set(destinations)} """
+        services = {}
+        dests = {}
+        if not os.path.exists("/proc/net/ip_vs"):
+            return services, dests
+        for line in CsHelper.execute("ipvsadm-save -n"):
+            m = IPVS_SERVICE_RE.match(line)
+            if m:
+                services[m.group(1)] = (m.group(2), int(m.group(3) or 0))
+                dests.setdefault(m.group(1), set())
+                continue
+            m = IPVS_DEST_RE.match(line)
+            if m:
+                dests.setdefault(m.group(1), set()).add(m.group(2))
+        return services, dests
 
     def _create_pem_for_sslcert(self, ssl_certs):
         logging.debug("CsLoadBalancer:: creating new pem files in %s and cleaning up it" % SSL_CERTS_DIR)

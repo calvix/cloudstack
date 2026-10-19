@@ -32,6 +32,9 @@ import com.cloud.agent.api.routing.LoadBalancerConfigCommand;
 import com.cloud.agent.api.to.LoadBalancerTO;
 import com.cloud.network.lb.LoadBalancingRule.LbDestination;
 import com.cloud.network.lb.LoadBalancingRule.LbSslCert;
+import com.cloud.network.lb.LoadBalancingRule.LbStickinessPolicy;
+import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.UdpLbEntry;
+import com.cloud.utils.Pair;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -156,6 +159,65 @@ public class HAProxyConfiguratorTest {
         LoadBalancerConfigCommand cmd = new LoadBalancerConfigCommand(lba, "10.0.0.1", "10.1.0.1", "10.1.1.1", null, 1L, "12", false, 0L);
         String result = genConfig(hpg, cmd);
         Assert.assertTrue(result.contains("bind 10.2.0.1:443 ssl crt /etc/cloudstack/ssl/10_2_0_1-443.pem"));
+    }
+
+    private LoadBalancerConfigCommand udpAndTcpCommand(List<LbStickinessPolicy> stickiness) {
+        final List<LbDestination> dests = new ArrayList<>();
+        dests.add(new LbDestination(5353, 5353, "10.1.10.2", false));
+        dests.add(new LbDestination(5353, 5353, "10.1.10.3", true));
+        LoadBalancerTO udp = new LoadBalancerTO("1", "10.2.0.1", 53, "tcp", "source", false, false, false, dests, stickiness);
+        udp.setLbProtocol("udp");
+        udp.setCidrList("1.1.1.1 2.2.2.0/24");
+        LoadBalancerTO tcp = new LoadBalancerTO("2", "10.2.0.1", 22, "tcp", "roundrobin", false, false, false, null);
+        LoadBalancerTO[] lba = new LoadBalancerTO[] {udp, tcp};
+        return new LoadBalancerConfigCommand(lba, "10.0.0.1", "10.1.0.1", "10.1.1.1", null, 1L, "12", false, 0L);
+    }
+
+    @Test
+    public void generateConfigurationTestUdpRuleNotInHaproxy() {
+        HAProxyConfigurator hpg = new HAProxyConfigurator();
+        LoadBalancerConfigCommand cmd = udpAndTcpCommand(null);
+        String result = genConfig(hpg, cmd);
+        Assert.assertTrue(result.contains("listen 10_2_0_1-22"));
+        Assert.assertFalse(result.contains("10_2_0_1-53"));
+
+        String[][] fwRules = hpg.generateFwRules(cmd);
+        Assert.assertArrayEquals(new String[] {"10.2.0.1:22:"}, fwRules[LoadBalancerConfigurator.ADD]);
+    }
+
+    @Test
+    public void generateUdpEntriesTest() {
+        HAProxyConfigurator hpg = new HAProxyConfigurator();
+        UdpLbEntry[] entries = hpg.generateUdpEntries(udpAndTcpCommand(null));
+        Assert.assertEquals(1, entries.length);
+        Assert.assertEquals("10.2.0.1", entries[0].getSourceIp());
+        Assert.assertEquals(53, entries[0].getSourcePort());
+        Assert.assertEquals("sh", entries[0].getScheduler());
+        Assert.assertEquals(0, entries[0].getPersistence());
+        Assert.assertArrayEquals("revoked destinations are left out", new String[] {"10.1.10.2:5353"}, entries[0].getDestinations());
+        Assert.assertArrayEquals(new String[] {"1.1.1.1", "2.2.2.0/24"}, entries[0].getCidrs());
+    }
+
+    @Test
+    public void generateUdpEntriesTestSourceStickinessBecomesPersistence() {
+        List<Pair<String, String>> params = new ArrayList<>();
+        params.add(new Pair<>("expire", "30m"));
+        List<LbStickinessPolicy> stickiness = new ArrayList<>();
+        stickiness.add(new LbStickinessPolicy("SourceBased", params));
+        UdpLbEntry[] entries = new HAProxyConfigurator().generateUdpEntries(udpAndTcpCommand(stickiness));
+        Assert.assertEquals(1800, entries[0].getPersistence());
+
+        stickiness.clear();
+        stickiness.add(new LbStickinessPolicy("SourceBased", new ArrayList<>()));
+        entries = new HAProxyConfigurator().generateUdpEntries(udpAndTcpCommand(stickiness));
+        Assert.assertEquals("default expire is 3h", 10800, entries[0].getPersistence());
+    }
+
+    @Test
+    public void getIpvsSchedulerTest() {
+        Assert.assertEquals("rr", HAProxyConfigurator.getIpvsScheduler("roundrobin"));
+        Assert.assertEquals("lc", HAProxyConfigurator.getIpvsScheduler("leastconn"));
+        Assert.assertEquals("sh", HAProxyConfigurator.getIpvsScheduler("source"));
     }
 
     private String genConfig(HAProxyConfigurator hpg, LoadBalancerConfigCommand cmd) {

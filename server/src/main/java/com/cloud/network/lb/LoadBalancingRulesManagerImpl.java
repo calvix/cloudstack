@@ -2327,6 +2327,10 @@ public class LoadBalancingRulesManagerImpl<Type> extends ManagerBase implements 
         }
 
         if (StringUtils.isNotBlank(lbProtocol)) {
+            if (NetUtils.UDP_PROTO.equals(lbProtocol) != NetUtils.UDP_PROTO.equals(lb.getProtocol())) {
+                // the rule's firewall protocol (tcp / udp) is fixed when the rule is created
+                throw new InvalidParameterValueException("The protocol of a load balancer rule cannot be changed between udp and tcp based protocols, create a new rule instead");
+            }
             lb.setLbProtocol(lbProtocol);
         }
 

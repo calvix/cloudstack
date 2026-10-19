@@ -69,6 +69,13 @@ import com.cloud.vm.DomainRouterVO;
 import com.cloud.vm.VirtualMachineName;
 import com.cloud.vm.dao.DomainRouterDao;
 import com.cloud.vm.dao.NicDao;
+import com.cloud.configuration.Config;
+import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.network.lb.LoadBalancingRule;
+import com.cloud.utils.Pair;
+import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
+
+import java.util.ArrayList;
 
 import java.util.List;
 import java.util.Map;
@@ -100,6 +107,9 @@ public class NetworkHelperImplTest {
 
     @Mock
     private NicDao nicDaoMock;
+
+    @Mock
+    private ConfigurationDao configDaoMock;
 
     @Mock
     private RouterDeploymentDefinition routerDeploymentDefinition;
@@ -533,5 +543,39 @@ public class NetworkHelperImplTest {
 
         Map<Network, List<? extends NicProfile>> nic = networkHelperSpy.configurePublicNic(routerDeploymentDefinitionMock, false);
         Mockito.verify(ipv6ServiceMock).updateNicIpv6(Mockito.eq(nic.get(networkMock).get(0)), Mockito.any(), Mockito.eq(networkMock));
+    }
+
+    private LoadBalancingRule udpRule(List<LoadBalancingRule.LbStickinessPolicy> stickiness) {
+        when(configDaoMock.getValue(Config.NetworkLBHaproxyStatsPort.key())).thenReturn("8081");
+        LoadBalancingRule rule = mock(LoadBalancingRule.class);
+        when(rule.getSourcePortStart()).thenReturn(53);
+        when(rule.getLbProtocol()).thenReturn("udp");
+        when(rule.getStickinessPolicies()).thenReturn(stickiness);
+        return rule;
+    }
+
+    @Test
+    public void validateHAProxyLBRuleTestUdpAccepted() {
+        List<Pair<String, String>> params = new ArrayList<>();
+        params.add(new Pair<>("expire", "30m"));
+        List<LoadBalancingRule.LbStickinessPolicy> stickiness = new ArrayList<>();
+        stickiness.add(new LoadBalancingRule.LbStickinessPolicy("SourceBased", params));
+        assertTrue(networkHelperSpy.validateHAProxyLBRule(udpRule(stickiness)));
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void validateHAProxyLBRuleTestUdpRejectsCookieStickiness() {
+        List<LoadBalancingRule.LbStickinessPolicy> stickiness = new ArrayList<>();
+        stickiness.add(new LoadBalancingRule.LbStickinessPolicy("LbCookie", new ArrayList<>()));
+        networkHelperSpy.validateHAProxyLBRule(udpRule(stickiness));
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void validateHAProxyLBRuleTestUdpRejectsBadExpire() {
+        List<Pair<String, String>> params = new ArrayList<>();
+        params.add(new Pair<>("expire", "soon"));
+        List<LoadBalancingRule.LbStickinessPolicy> stickiness = new ArrayList<>();
+        stickiness.add(new LoadBalancingRule.LbStickinessPolicy("SourceBased", params));
+        networkHelperSpy.validateHAProxyLBRule(udpRule(stickiness));
     }
 }
