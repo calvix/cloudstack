@@ -37,6 +37,7 @@ import com.cloud.agent.api.to.LoadBalancerTO.DestinationTO;
 import com.cloud.agent.api.to.LoadBalancerTO.StickinessPolicyTO;
 import com.cloud.agent.api.to.PortForwardingRuleTO;
 import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.SslCertEntry;
+import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.UdpLbEntry;
 import com.cloud.network.lb.LoadBalancingRule.LbSslCert;
 import com.cloud.network.rules.LbStickinessMethod.StickinessMethodType;
 import com.cloud.utils.Pair;
@@ -683,7 +684,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
         result.add(blankLine);
         boolean has_listener = false;
         for (final LoadBalancerTO lbTO : lbCmd.getLoadBalancers()) {
-            if (lbTO.isRevoked()) {
+            if (lbTO.isRevoked() || isUdp(lbTO)) {
                 continue;
             }
             final List<String> poolRules = getRulesForPool(lbTO, lbCmd);
@@ -708,6 +709,9 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
         final Set<String> toStats = new HashSet<String>();
 
         for (final LoadBalancerTO lbTO : lbCmd.getLoadBalancers()) {
+            if (isUdp(lbTO)) {
+                continue;
+            }
 
             final StringBuilder sb = new StringBuilder();
             sb.append(lbTO.getSrcIp()).append(":");
@@ -763,5 +767,74 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
         final String name = sb.append(lbTO.getSrcIp().replace(".", "_")).append('-').append(lbTO.getSrcPort()).toString();
         final SslCertEntry sslCertEntry = new SslCertEntry(name, cert.getCert(), cert.getKey(), cert.getChain(), cert.getPassword());
         sslCertEntries.add(sslCertEntry);
+    }
+
+    private static boolean isUdp(final LoadBalancerTO lbTO) {
+        return NetUtils.UDP_PROTO.equalsIgnoreCase(lbTO.getLbProtocol());
+    }
+
+    @Override
+    public UdpLbEntry[] generateUdpEntries(final LoadBalancerConfigCommand lbCmd) {
+        final List<UdpLbEntry> result = new ArrayList<>();
+        for (final LoadBalancerTO lbTO : lbCmd.getLoadBalancers()) {
+            if (lbTO.isRevoked() || !isUdp(lbTO)) {
+                continue;
+            }
+            final List<String> destinations = new ArrayList<>();
+            for (final DestinationTO dest : lbTO.getDestinations()) {
+                if (!dest.isRevoked()) {
+                    destinations.add(dest.getDestIp() + ":" + dest.getDestPort());
+                }
+            }
+            final String[] cidrs = StringUtils.isBlank(lbTO.getCidrList()) ? new String[0] : lbTO.getCidrList().trim().split("\\s+");
+            result.add(new UdpLbEntry(lbTO.getSrcIp(), lbTO.getSrcPort(), getIpvsScheduler(lbTO.getAlgorithm()), getIpvsPersistence(lbTO),
+                    destinations.toArray(new String[0]), cidrs));
+        }
+        return result.toArray(new UdpLbEntry[0]);
+    }
+
+    protected static String getIpvsScheduler(final String algorithm) {
+        if ("leastconn".equals(algorithm)) {
+            return "lc";
+        }
+        if ("source".equals(algorithm)) {
+            return "sh";
+        }
+        return "rr";
+    }
+
+    /**
+     * Source based stickiness becomes IPVS persistence; its "expire" value (default 3h, as for haproxy) is the timeout.
+     */
+    protected static int getIpvsPersistence(final LoadBalancerTO lbTO) {
+        if (lbTO.getStickinessPolicies() == null) {
+            return 0;
+        }
+        for (final StickinessPolicyTO policy : lbTO.getStickinessPolicies()) {
+            if (policy == null || !StickinessMethodType.SourceBased.getName().equalsIgnoreCase(policy.getMethodName())) {
+                continue;
+            }
+            String expire = "3h";
+            for (final Pair<String, String> param : policy.getParams()) {
+                if ("expire".equalsIgnoreCase(param.first()) && StringUtils.isNotBlank(param.second())) {
+                    expire = param.second().trim();
+                }
+            }
+            return durationToSeconds(expire);
+        }
+        return 0;
+    }
+
+    private static int durationToSeconds(final String duration) {
+        final char unit = duration.charAt(duration.length() - 1);
+        final int multiplier;
+        switch (unit) {
+            case 's': multiplier = 1; break;
+            case 'm': multiplier = 60; break;
+            case 'h': multiplier = 3600; break;
+            case 'd': multiplier = 86400; break;
+            default: return Integer.parseInt(duration);
+        }
+        return Integer.parseInt(duration.substring(0, duration.length() - 1)) * multiplier;
     }
 }

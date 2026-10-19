@@ -959,10 +959,8 @@ public class NetworkHelperImpl implements NetworkHelper {
         }
         String lbProtocol = rule.getLbProtocol();
         if (lbProtocol != null && lbProtocol.toLowerCase().equals(NetUtils.UDP_PROTO)) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Can't create LB rule as haproxy does not support UDP");
-            }
-            return false;
+            // UDP rules are not served by haproxy but by IPVS in the router kernel
+            return validateUdpLBRule(rule);
         }
 
         validateHAproxyLbProtocol(rule.getLbProtocol());
@@ -1014,6 +1012,32 @@ public class NetworkHelperImpl implements NetworkHelper {
                 }
                 if (holdTime != null && !containsOnlyNumbers(holdTime, timeEndChar) && !containsOnlyNumbers(holdTime, null)) {
                     throw new InvalidParameterValueException(String.format("Failed LB in validation rule id: %s Cause: holdtime is not in timeformat: %s", rule.getLb(), holdTime));
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean validateUdpLBRule(final LoadBalancingRule rule) {
+        for (final LoadBalancingRule.LbStickinessPolicy stickinessPolicy : rule.getStickinessPolicies()) {
+            if (stickinessPolicy.isRevoked()) {
+                continue;
+            }
+            if (!LbStickinessMethod.StickinessMethodType.SourceBased.getName().equalsIgnoreCase(stickinessPolicy.getMethodName())) {
+                throw new InvalidParameterValueException(String.format("Stickiness method %s is not supported for UDP load balancer rules, only %s",
+                        stickinessPolicy.getMethodName(), LbStickinessMethod.StickinessMethodType.SourceBased.getName()));
+            }
+            // "expire" becomes the IPVS persistence timeout
+            for (final Pair<String, String> param : stickinessPolicy.getParams()) {
+                if ("expire".equalsIgnoreCase(param.first()) && param.second() != null && !param.second().trim().matches("\\d+[smhd]?")) {
+                    throw new InvalidParameterValueException(String.format("Invalid expire value %s, expected a number with an optional unit s, m, h or d", param.second()));
+                }
+            }
+        }
+        if (rule.getHealthCheckPolicies() != null) {
+            for (final LoadBalancingRule.LbHealthCheckPolicy healthCheckPolicy : rule.getHealthCheckPolicies()) {
+                if (!healthCheckPolicy.isRevoked()) {
+                    throw new InvalidParameterValueException("Health check policies are not supported for UDP load balancer rules");
                 }
             }
         }
