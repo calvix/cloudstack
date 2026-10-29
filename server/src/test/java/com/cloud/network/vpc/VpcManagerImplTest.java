@@ -40,7 +40,9 @@ import com.cloud.network.NetworkService;
 import com.cloud.network.PhysicalNetwork;
 import com.cloud.network.dao.FirewallRulesDao;
 import com.cloud.network.dao.IPAddressDao;
+import com.cloud.network.IpAddressManager;
 import com.cloud.network.dao.IPAddressVO;
+import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.element.NetworkElement;
 import com.cloud.network.element.VpcProvider;
@@ -171,6 +173,8 @@ public class VpcManagerImplTest {
     NetworkACLVO networkACLVOMock;
     @Mock
     RoutedIpv4Manager routedIpv4Manager;
+    @Mock
+    IpAddressManager ipAddressManager;
 
     public static final long ACCOUNT_ID = 1;
     private AccountVO account;
@@ -231,6 +235,7 @@ public class VpcManagerImplTest {
         manager._firewallDao = firewallDao;
         manager._networkAclDao = networkACLDaoMock;
         manager.routedIpv4Manager = routedIpv4Manager;
+        manager._ipAddrMgr = ipAddressManager;
         CallContext.register(Mockito.mock(User.class), Mockito.mock(Account.class));
         registerCallContext();
         overrideDefaultConfigValue(NetworkService.AllowUsersToSpecifyVRMtu, "_defaultValue", "false");
@@ -658,4 +663,57 @@ public class VpcManagerImplTest {
         Assert.assertTrue(result.isEmpty());
     }
 
+    private IPAddressVO vpcIpWithRules(FirewallRuleVO... rules) {
+        IPAddressVO ip = Mockito.mock(IPAddressVO.class);
+        Mockito.when(ip.getId()).thenReturn(10L);
+        Mockito.when(ip.getVpcId()).thenReturn(1L);
+        Mockito.when(firewallDao.listByIp(10L)).thenReturn(List.of(rules));
+        return ip;
+    }
+
+    private FirewallRuleVO ruleOnNetwork(Long networkId) {
+        FirewallRuleVO rule = Mockito.mock(FirewallRuleVO.class);
+        Mockito.when(rule.getNetworkId()).thenReturn(networkId);
+        return rule;
+    }
+
+    @Test
+    public void vpcFirewallRuleDoesNotHoldTheNetworkAssociation() {
+        Assert.assertFalse(manager.isIpUsedByVpcNetworkRules(vpcIpWithRules(ruleOnNetwork(null))));
+    }
+
+    @Test
+    public void ruleOfANetworkHoldsTheNetworkAssociation() {
+        Assert.assertTrue(manager.isIpUsedByVpcNetworkRules(vpcIpWithRules(ruleOnNetwork(null), ruleOnNetwork(5L))));
+    }
+
+    @Test
+    public void staticNatHoldsTheNetworkAssociation() {
+        IPAddressVO ip = Mockito.mock(IPAddressVO.class);
+        Mockito.when(ip.getVpcId()).thenReturn(1L);
+        Mockito.when(ip.isOneToOneNat()).thenReturn(true);
+        Assert.assertTrue(manager.isIpUsedByVpcNetworkRules(ip));
+    }
+
+    @Test
+    public void unassignIPFromVpcNetworkUnbindsAnIpWithOnlyVpcFirewallRules() throws ResourceUnavailableException {
+        IPAddressVO ip = vpcIpWithRules(ruleOnNetwork(null));
+        Network network = Mockito.mock(Network.class);
+        Mockito.when(ipAddressManager.applyIpAssociations(network, true)).thenReturn(true);
+
+        manager.unassignIPFromVpcNetwork(ip, network);
+
+        Mockito.verify(ip).setAssociatedWithNetworkId(null);
+        Mockito.verify(ipAddressDao).update(10L, ip);
+    }
+
+    @Test
+    public void unassignIPFromVpcNetworkKeepsAnIpWithRulesOfANetwork() throws ResourceUnavailableException {
+        IPAddressVO ip = vpcIpWithRules(ruleOnNetwork(5L));
+
+        manager.unassignIPFromVpcNetwork(ip, Mockito.mock(Network.class));
+
+        Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
+        Mockito.verify(ip, Mockito.never()).setAssociatedWithNetworkId(null);
+    }
 }

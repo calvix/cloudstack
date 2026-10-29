@@ -822,11 +822,16 @@ public class IpAddressManagerImpl extends ManagerBase implements IpAddressManage
                 logger.debug("Releasing ip {}; sourceNat = {}", ip, ip.isSourceNat());
             }
 
-            if (ip.getAssociatedWithNetworkId() != null) {
-                Network network = _networksDao.findById(ip.getAssociatedWithNetworkId());
+            Network associatedNetwork = ip.getAssociatedWithNetworkId() == null ? null : _networksDao.findById(ip.getAssociatedWithNetworkId());
+            if (ip.getAssociatedWithNetworkId() != null && associatedNetwork == null) {
+                // The network is gone, and with it the IP's place on a router; release the IP as an unassociated one
+                logger.warn("IP {} is still associated with the removed network with ID {}; releasing it without applying IP associations",
+                        ip, ip.getAssociatedWithNetworkId());
+            }
+            if (associatedNetwork != null) {
                 try {
-                    if (!applyIpAssociations(network, rulesContinueOnErrFlag)) {
-                        logger.warn("Unable to apply ip address associations for " + network);
+                    if (!applyIpAssociations(associatedNetwork, rulesContinueOnErrFlag)) {
+                        logger.warn("Unable to apply ip address associations for " + associatedNetwork);
                         success = false;
                     }
                 } catch (ResourceUnavailableException e) {
