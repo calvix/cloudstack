@@ -678,26 +678,27 @@ public class VpcManagerImplTest {
     }
 
     @Test
-    public void vpcFirewallRuleDoesNotHoldTheNetworkAssociation() {
-        Assert.assertFalse(manager.isIpUsedByVpcNetworkRules(vpcIpWithRules(ruleOnNetwork(null))));
+    public void vpcFirewallRuleDoesNotKeepTheIpAllocated() {
+        Assert.assertFalse(manager.isIpAllocatedToVpc(vpcIpWithRules(ruleOnNetwork(null))));
     }
 
     @Test
-    public void ruleOfANetworkHoldsTheNetworkAssociation() {
-        Assert.assertTrue(manager.isIpUsedByVpcNetworkRules(vpcIpWithRules(ruleOnNetwork(null), ruleOnNetwork(5L))));
+    public void ruleOfANetworkKeepsTheIpAllocated() {
+        Assert.assertTrue(manager.isIpAllocatedToVpc(vpcIpWithRules(ruleOnNetwork(null), ruleOnNetwork(5L))));
     }
 
     @Test
-    public void staticNatHoldsTheNetworkAssociation() {
+    public void staticNatKeepsTheIpAllocated() {
         IPAddressVO ip = Mockito.mock(IPAddressVO.class);
         Mockito.when(ip.getVpcId()).thenReturn(1L);
         Mockito.when(ip.isOneToOneNat()).thenReturn(true);
-        Assert.assertTrue(manager.isIpUsedByVpcNetworkRules(ip));
+        Assert.assertTrue(manager.isIpAllocatedToVpc(ip));
     }
 
     @Test
     public void unassignIPFromVpcNetworkUnbindsAnIpWithOnlyVpcFirewallRules() throws ResourceUnavailableException {
         IPAddressVO ip = vpcIpWithRules(ruleOnNetwork(null));
+        Mockito.when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
         Network network = Mockito.mock(Network.class);
         Mockito.when(ipAddressManager.applyIpAssociations(network, true)).thenReturn(true);
 
@@ -705,15 +706,44 @@ public class VpcManagerImplTest {
 
         Mockito.verify(ip).setAssociatedWithNetworkId(null);
         Mockito.verify(ipAddressDao).update(10L, ip);
+        Mockito.verify(ipAddressDao).releaseFromLockTable(10L);
     }
 
     @Test
     public void unassignIPFromVpcNetworkKeepsAnIpWithRulesOfANetwork() throws ResourceUnavailableException {
         IPAddressVO ip = vpcIpWithRules(ruleOnNetwork(5L));
+        Mockito.when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
 
         manager.unassignIPFromVpcNetwork(ip, Mockito.mock(Network.class));
 
         Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
         Mockito.verify(ip, Mockito.never()).setAssociatedWithNetworkId(null);
+        Mockito.verify(ipAddressDao).releaseFromLockTable(10L);
+    }
+
+    @Test
+    public void unassignIPFromVpcNetworkChecksTheIpAsItIsUnderTheLock() throws ResourceUnavailableException {
+        IPAddressVO staleIp = vpcIpWithRules();
+        IPAddressVO lockedIp = Mockito.mock(IPAddressVO.class);
+        Mockito.when(lockedIp.getVpcId()).thenReturn(1L);
+        // static NAT was enabled on the IP while the caller was revoking its last rule
+        Mockito.when(lockedIp.isOneToOneNat()).thenReturn(true);
+        Mockito.when(ipAddressDao.acquireInLockTable(10L)).thenReturn(lockedIp);
+
+        manager.unassignIPFromVpcNetwork(staleIp, Mockito.mock(Network.class));
+
+        Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
+        Mockito.verify(ipAddressDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
+    public void unassignIPFromVpcNetworkKeepsAnIpItCannotLock() throws ResourceUnavailableException {
+        IPAddressVO ip = vpcIpWithRules();
+        Mockito.when(ipAddressDao.acquireInLockTable(10L)).thenReturn(null);
+
+        manager.unassignIPFromVpcNetwork(ip, Mockito.mock(Network.class));
+
+        Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
+        Mockito.verify(ipAddressDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
     }
 }

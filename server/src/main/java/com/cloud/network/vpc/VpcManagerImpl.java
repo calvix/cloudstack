@@ -3818,48 +3818,55 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
 
     @Override
     public void unassignIPFromVpcNetwork(final IPAddressVO ip, final Network network) {
-        if (isIpUsedByVpcNetworkRules(ip)) {
-            return;
-        }
-
         if (ip == null || ip.getVpcId() == null) {
             return;
         }
 
-        logger.debug("Releasing VPC ip address {} from vpc network {}", ip, network);
-
-        final long vpcId = ip.getVpcId();
-        boolean success = false;
+        // the lock keeps a rule that is being created on the IP from losing its network association
+        final IPAddressVO lockedIp = _ipAddressDao.acquireInLockTable(ip.getId());
+        if (lockedIp == null) {
+            logger.warn("Unable to lock VPC ip address {}; leaving it associated with vpc network {}", ip, network);
+            return;
+        }
         try {
-            // unassign ip from the VPC router
-            success = _ipAddrMgr.applyIpAssociations(network, true);
-        } catch (final ResourceUnavailableException ex) {
-            throw new CloudRuntimeException("Failed to apply ip associations for network id=" + network + " as a part of unassigning ip " + ip + " from vpc", ex);
-        }
+            if (isIpAllocatedToVpc(lockedIp)) {
+                return;
+            }
 
-        if (success) {
-            ip.setAssociatedWithNetworkId(null);
-            _ipAddressDao.update(ip.getId(), ip);
-            logger.debug("IP address {} is no longer associated with the network inside vpc {}", ip, vpcDao.findById(vpcId));
-        } else {
-            throw new CloudRuntimeException(String.format("Failed to apply ip associations for network %s as a part of unassigning ip %s from vpc", network, ip));
+            logger.debug("Releasing VPC ip address {} from vpc network {}", lockedIp, network);
+
+            final long vpcId = lockedIp.getVpcId();
+            boolean success = false;
+            try {
+                // unassign ip from the VPC router
+                success = _ipAddrMgr.applyIpAssociations(network, true);
+            } catch (final ResourceUnavailableException ex) {
+                throw new CloudRuntimeException("Failed to apply ip associations for network id=" + network + " as a part of unassigning ip " + lockedIp + " from vpc", ex);
+            }
+
+            if (success) {
+                lockedIp.setAssociatedWithNetworkId(null);
+                _ipAddressDao.update(lockedIp.getId(), lockedIp);
+                logger.debug("IP address {} is no longer associated with the network inside vpc {}", lockedIp, vpcDao.findById(vpcId));
+            } else {
+                throw new CloudRuntimeException(String.format("Failed to apply ip associations for network %s as a part of unassigning ip %s from vpc", network, lockedIp));
+            }
+            logger.debug("Successfully released VPC ip address " + lockedIp + " back to VPC pool ");
+        } finally {
+            _ipAddressDao.releaseFromLockTable(ip.getId());
         }
-        logger.debug("Successfully released VPC ip address " + ip + " back to VPC pool ");
     }
 
     /**
-     * Whether a VPC IP still needs its network association: it has static NAT, or a rule that belongs to a network
-     * (port forwarding, load balancing, static NAT). VPC firewall rules are applied through the VPC and have no network,
-     * so they do not hold the association; otherwise deleting the network leaves the IP bound to a removed network.
+     * Whether a VPC IP is in use, which keeps it associated with its network and plugged on the VPC router: it has
+     * static NAT, or a rule that belongs to a network (port forwarding, load balancing, static NAT). VPC firewall rules
+     * are applied through the VPC and have no network, so they need neither; otherwise deleting the network leaves the
+     * IP associated with a removed network.
      */
-    protected boolean isIpUsedByVpcNetworkRules(final IpAddress ip) {
-        return ip != null && ip.getVpcId() != null
-                && (ip.isOneToOneNat() || _firewallDao.listByIp(ip.getId()).stream().anyMatch(rule -> rule.getNetworkId() != null));
-    }
-
     @Override
     public boolean isIpAllocatedToVpc(final IpAddress ip) {
-        return ip != null && ip.getVpcId() != null && (ip.isOneToOneNat() || !_firewallDao.listByIp(ip.getId()).isEmpty());
+        return ip != null && ip.getVpcId() != null
+                && (ip.isOneToOneNat() || _firewallDao.listByIp(ip.getId()).stream().anyMatch(rule -> rule.getNetworkId() != null));
     }
 
     @DB
