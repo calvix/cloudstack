@@ -47,6 +47,7 @@ import org.junit.runners.JUnit4;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.mockito.ArgumentMatchers;
 import org.mockito.MockedStatic;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import com.cloud.api.query.dao.DomainRouterJoinDao;
@@ -1102,6 +1103,7 @@ public class NetworkOrchestratorTest extends TestCase {
 
     @Test
     public void vpcIpWithRulesOfAnotherNetworkIsBoundToThatNetwork() {
+        otherNetwork(2L, Network.State.Implemented);
         IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(1L, FirewallRule.State.Revoke), rule(2L, FirewallRule.State.Active));
         when(testOrchestrator._ipAddressDao.listByAssociatedNetwork(1L, null)).thenReturn(List.of(ip));
 
@@ -1126,6 +1128,59 @@ public class NetworkOrchestratorTest extends TestCase {
         IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Revoke));
 
         Assert.assertNull(testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    private void otherNetwork(long networkId, Network.State state) {
+        NetworkVO network = mock(NetworkVO.class);
+        when(network.getState()).thenReturn(state);
+        when(testOrchestrator._networksDao.findById(networkId)).thenReturn(network);
+    }
+
+    @Test
+    public void ipIsBoundToAnImplementedNetworkBeforeAnIdleOne() {
+        otherNetwork(2L, Network.State.Allocated);
+        otherNetwork(3L, Network.State.Implemented);
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Active), rule(3L, FirewallRule.State.Active));
+
+        assertEquals(Long.valueOf(3L), testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    @Test
+    public void ipIsBoundToANetworkWithAnActiveRuleBeforeOneWithARuleBeingAdded() {
+        otherNetwork(2L, Network.State.Implemented);
+        otherNetwork(3L, Network.State.Implemented);
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Add), rule(3L, FirewallRule.State.Active));
+
+        assertEquals(Long.valueOf(3L), testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    @Test
+    public void ipIsBoundToAnIdleNetworkWhenNoOtherUsesIt() {
+        otherNetwork(2L, Network.State.Allocated);
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Active));
+
+        assertEquals(Long.valueOf(2L), testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    @Test
+    public void ruleOfARemovedNetworkDoesNotKeepTheIp() {
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Active));
+
+        Assert.assertNull(testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    @Test
+    public void ipsToReleaseAreListedOnlyAfterTheSharedOnesAreRebound() {
+        otherNetwork(2L, Network.State.Implemented);
+        IPAddressVO shared = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Active));
+        IPAddressVO own = vpcIpOnNetwork(11L, 1L, rule(1L, FirewallRule.State.Active));
+        when(testOrchestrator._ipAddressDao.listByAssociatedNetwork(1L, null)).thenReturn(List.of(shared, own), List.of(own));
+
+        assertEquals(List.of(own), testOrchestrator.rebindSharedVpcIpsAndListIpsToRelease(vpcNetwork(1L)));
+
+        InOrder inOrder = Mockito.inOrder(testOrchestrator._ipAddressDao);
+        inOrder.verify(testOrchestrator._ipAddressDao).update(10L, shared);
+        inOrder.verify(testOrchestrator._ipAddressDao).listByAssociatedNetwork(1L, null);
     }
 
     @Test
