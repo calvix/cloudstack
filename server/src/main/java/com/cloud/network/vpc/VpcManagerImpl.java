@@ -74,6 +74,8 @@ import org.apache.cloudstack.network.Ipv4GuestSubnetNetworkMap;
 import org.apache.cloudstack.network.RoutedIpv4Manager;
 import org.apache.cloudstack.query.QueryService;
 import org.apache.cloudstack.reservation.dao.ReservationDao;
+import org.apache.cloudstack.resourcedetail.VpcDetailVO;
+import org.apache.cloudstack.resourcedetail.dao.VpcDetailsDao;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.EnumUtils;
 import org.apache.commons.lang3.ObjectUtils;
@@ -81,8 +83,10 @@ import org.jetbrains.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 
+import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.Command;
+import com.cloud.agent.api.UpdateVmNicCommand;
 import com.cloud.agent.api.to.IpAddressTO;
 import com.cloud.agent.manager.Commands;
 import com.cloud.alert.AlertManager;
@@ -333,6 +337,10 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     Site2SiteCustomerGatewayDao site2SiteCustomerGatewayDao;
     @Inject
     ExtensionHelper extensionHelper;
+    @Inject
+    VpcDetailsDao vpcDetailsDao;
+    @Inject
+    AgentManager agentManager;
 
     private final ScheduledExecutorService _executor = Executors.newScheduledThreadPool(1, new NamedThreadFactory("VpcChecker"));
     private List<VpcProvider> vpcElements = null;
@@ -1737,6 +1745,9 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     @ActionEvent(eventType = EventTypes.EVENT_VPC_CREATE, eventDescription = "creating vpc", create = true)
     public Vpc createVpc(CreateVPCCmd cmd) throws ResourceAllocationException {
         List<Long> bgpPeerIds = (cmd instanceof CreateVPCCmdByAdmin) ? ((CreateVPCCmdByAdmin)cmd).getBgpPeerIds() : null;
+        if (cmd.getNetworkRate() != null) {
+            validateVpcNetworkRate(CallContext.current().getCallingAccount(), cmd.getEntityOwnerId(), cmd.getNetworkRate());
+        }
         Vpc vpc = createVpc(cmd.getZoneId(), cmd.getVpcOffering(), cmd.getEntityOwnerId(), cmd.getVpcName(), cmd.getDisplayText(),
             cmd.getCidr(), cmd.getNetworkDomain(), cmd.getIp4Dns1(), cmd.getIp4Dns2(), cmd.getIp6Dns1(),
             cmd.getIp6Dns2(), cmd.isDisplay(), cmd.getPublicMtu(), cmd.getCidrSize(), cmd.getAsNumber(), bgpPeerIds,
@@ -1756,6 +1767,9 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             }
             if (isVpcOfferingDynamicRouting(vpc)) {
                 bgpService.allocateASNumber(vpc.getZoneId(), cmd.getAsNumber(), null, vpc.getId());
+            }
+            if (cmd.getNetworkRate() != null) {
+                vpcDetailsDao.addDetail(vpc.getId(), NETWORK_RATE_DETAIL, String.valueOf(cmd.getNetworkRate()), true);
             }
         } catch (CloudRuntimeException ex) {
             try {
@@ -1959,13 +1973,14 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     @Override
     public Vpc updateVpc(UpdateVPCCmd cmd) throws ResourceUnavailableException, InsufficientCapacityException {
         return updateVpc(cmd.getId(), cmd.getVpcName(), cmd.getDisplayText(), cmd.getCustomId(),
-                cmd.isDisplayVpc(), cmd.getPublicMtu(), cmd.getSourceNatIP(), cmd.getKeepMacAddressOnPublicNic());
+                cmd.isDisplayVpc(), cmd.getPublicMtu(), cmd.getSourceNatIP(), cmd.getKeepMacAddressOnPublicNic(), cmd.getNetworkRate());
     }
 
     @Override
     @ActionEvent(eventType = EventTypes.EVENT_VPC_UPDATE, eventDescription = "updating vpc")
     public Vpc updateVpc(final long vpcId, final String vpcName, final String displayText, final String customId,
-                         final Boolean displayVpc, Integer mtu, String sourceNatIp, Boolean keepMacAddressOnPublicNic) throws ResourceUnavailableException, InsufficientCapacityException {
+                         final Boolean displayVpc, Integer mtu, String sourceNatIp, Boolean keepMacAddressOnPublicNic,
+                         Integer networkRate) throws ResourceUnavailableException, InsufficientCapacityException {
         final Account caller = CallContext.current().getCallingAccount();
 
         // Verify input parameters
@@ -1977,6 +1992,9 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         CallContext.current().setEventDetails(" ID: " + vpcToUpdate.getUuid());
 
         _accountMgr.checkAccess(caller, null, false, vpcToUpdate);
+        if (networkRate != null) {
+            validateVpcNetworkRate(caller, vpcToUpdate.getAccountId(), networkRate);
+        }
 
         final VpcVO vpc = vpcDao.createForUpdate(vpcId);
         String previousVpcName = vpcToUpdate.getName();
@@ -2008,7 +2026,11 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
 
         boolean restartRequired = checkAndUpdateRouterSourceNatIp(vpcToUpdate, sourceNatIp);
 
-        if (vpcDao.update(vpcId, vpc) || restartRequired) { // Note that the update may fail because nothing has changed, other than the sourcenat ip
+        if (networkRate != null && !networkRate.equals(getVpcNetworkRate(vpcId))) {
+            updateVpcNetworkRate(vpcToUpdate, networkRate);
+        }
+
+        if (vpcDao.update(vpcId, vpc) || restartRequired || networkRate != null) { // Note that the update may fail because nothing has changed, other than the sourcenat ip
             logger.debug("Updated VPC {}", vpc);
             if (restartRequired) {
                 if (logger.isDebugEnabled()) {
@@ -2106,6 +2128,72 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             return null;
         }
         return requestedIp;
+    }
+
+    /**
+     * Checks a networkrate for a VPC of the given owner. Root admins can set any rate; other callers need the
+     * account setting vpc.max.network.rate above 0 and can set 1 up to that value, but not 0 (unlimited).
+     */
+    protected void validateVpcNetworkRate(Account caller, long ownerAccountId, Integer networkRate) {
+        if (networkRate == null) {
+            return;
+        }
+        if (networkRate < 0) {
+            throw new InvalidParameterValueException(String.format("%s must be 0 (unlimited) or a number of Mbps above 0", ApiConstants.NETWORKRATE));
+        }
+        if (_accountMgr.isRootAdmin(caller.getId())) {
+            return;
+        }
+        Integer maxNetworkRate = VpcMaxNetworkRate.valueIn(ownerAccountId);
+        if (maxNetworkRate == null || maxNetworkRate <= 0) {
+            throw new PermissionDeniedException(String.format("Setting %s on a VPC is not allowed for this account (%s is 0)",
+                    ApiConstants.NETWORKRATE, VpcMaxNetworkRate.key()));
+        }
+        if (networkRate == 0 || networkRate > maxNetworkRate) {
+            throw new InvalidParameterValueException(String.format("%s must be between 1 and %d Mbps for this account",
+                    ApiConstants.NETWORKRATE, maxNetworkRate));
+        }
+    }
+
+    @Override
+    public Integer getVpcNetworkRate(long vpcId) {
+        VpcDetailVO detail = vpcDetailsDao.findDetail(vpcId, NETWORK_RATE_DETAIL);
+        if (detail == null || detail.getValue() == null || detail.getValue().isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(detail.getValue());
+        } catch (NumberFormatException e) {
+            logger.warn("Ignoring the invalid {} [{}] of VPC with ID {}", NETWORK_RATE_DETAIL, detail.getValue(), vpcId);
+            return null;
+        }
+    }
+
+    /**
+     * Stores the VPC's networkrate and applies it to the public NICs of its running KVM routers. Stopped routers,
+     * and routers on other hypervisors, pick it up at their next start.
+     */
+    protected void updateVpcNetworkRate(VpcVO vpc, int networkRate) {
+        vpcDetailsDao.addDetail(vpc.getId(), NETWORK_RATE_DETAIL, String.valueOf(networkRate), true);
+        for (DomainRouterVO router : routerDao.listByVpcId(vpc.getId())) {
+            if (router.getState() != VirtualMachine.State.Running || router.getHypervisorType() != HypervisorType.KVM || router.getHostId() == null) {
+                logger.debug("Router {} gets the networkrate of VPC {} at its next start", router, vpc);
+                continue;
+            }
+            for (NicVO nic : nicDao.listByVmId(router.getId())) {
+                Network network = _ntwkDao.findById(nic.getNetworkId());
+                if (network == null || network.getTrafficType() != TrafficType.Public) {
+                    continue;
+                }
+                UpdateVmNicCommand command = new UpdateVmNicCommand(nic.getMacAddress(), router.getInstanceName(), null, networkRate);
+                Answer answer = agentManager.easySend(router.getHostId(), command);
+                if (answer == null || !answer.getResult()) {
+                    throw new CloudRuntimeException(String.format("Failed to set networkrate %d Mbps on the public NIC %s of router %s; " +
+                            "it is stored and applies at the router's next start", networkRate, nic.getMacAddress(), router.getInstanceName()));
+                }
+                logger.info("Set networkrate {} Mbps on the public NIC {} of router {}", networkRate, nic.getMacAddress(), router);
+            }
+        }
     }
 
     protected Integer validateMtu(VpcVO vpcToUpdate, Integer mtu) {
@@ -3721,7 +3809,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     public ConfigKey<?>[] getConfigKeys() {
         return new ConfigKey<?>[]{
                 VpcTierNamePrepend,
-                VpcTierNamePrependDelimiter
+                VpcTierNamePrependDelimiter,
+                VpcMaxNetworkRate
         };
     }
 

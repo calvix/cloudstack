@@ -274,6 +274,11 @@ public class LibvirtDomainXMLParser {
                     def.setSlot(Integer.parseInt(slot, 16));
                 }
 
+                String linkState = getAttrValue("link", "state", nic);
+                if ("down".equalsIgnoreCase(linkState)) {
+                    def.setLinkStateUp(false);
+                }
+
                 interfaces.add(def);
             }
 

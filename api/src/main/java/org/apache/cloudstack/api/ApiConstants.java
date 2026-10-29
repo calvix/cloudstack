@@ -1388,6 +1388,11 @@ public class ApiConstants {
 
     public static final String KEEP_MAC_ADDRESS_ON_PUBLIC_NIC = "keepmacaddressonpublicnic";
 
+    public static final String PARAMETER_DESCRIPTION_VPC_NETWORK_RATE =
+            "Data transfer rate in megabits per second on the public interfaces of the VPC's virtual routers; 0 means unlimited." +
+                    " Without it, the rate of the VPC's first network offering applies. A non-admin caller can set at most the value of" +
+                    " the account setting vpc.max.network.rate, and only when that setting is above 0.";
+
     public static final String PARAMETER_DESCRIPTION_KEEP_MAC_ADDRESS_ON_PUBLIC_NIC =
             "Indicates whether to use the same MAC address for the public NIC of VRs on the same network. If \"true\", when creating redundant routers or recreating" +
                     " a VR, CloudStack will use the same MAC address for the public NIC of all VRs. Otherwise, if \"false\", new public NICs will always have " +

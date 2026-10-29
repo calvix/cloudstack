@@ -476,4 +476,43 @@ public class LibvirtDomainXMLParserTest extends TestCase {
         assertEquals(LibvirtVMDef.GuestDef.BootType.BIOS, parser.getBootType());
         assertEquals(LibvirtVMDef.GuestDef.BootMode.LEGACY, parser.getBootMode());
     }
+
+    private InterfaceDef parseSingleInterface(String interfaceXml) {
+        String xml = "<domain type='kvm'>\n" +
+                "  <name>r-50-VM</name>\n" +
+                "  <devices>\n" + interfaceXml +
+                "  </devices>\n" +
+                "</domain>";
+        LibvirtDomainXMLParser parser = new LibvirtDomainXMLParser();
+        parser.parseDomainXML(xml);
+        assertEquals(1, parser.getInterfaces().size());
+        return parser.getInterfaces().get(0);
+    }
+
+    @Test
+    public void testInterfaceWithLinkStateDownIsParsedAsDown() {
+        InterfaceDef nic = parseSingleInterface("    <interface type='bridge'>\n" +
+                "      <mac address='1e:00:00:00:00:01'/>\n" +
+                "      <source bridge='cloudbr1'/>\n" +
+                "      <bandwidth><inbound average='250000' peak='250000'/><outbound average='250000' peak='250000'/></bandwidth>\n" +
+                "      <target dev='vnet0'/>\n" +
+                "      <model type='virtio'/>\n" +
+                "      <link state='down'/>\n" +
+                "    </interface>\n");
+
+        assertFalse(nic.isLinkStateUp());
+        assertEquals(250000, nic.getNetworkRateKBps());
+    }
+
+    @Test
+    public void testInterfaceWithoutLinkStateIsParsedAsUp() {
+        InterfaceDef nic = parseSingleInterface("    <interface type='bridge'>\n" +
+                "      <mac address='1e:00:00:00:00:01'/>\n" +
+                "      <source bridge='cloudbr1'/>\n" +
+                "      <target dev='vnet0'/>\n" +
+                "      <model type='virtio'/>\n" +
+                "    </interface>\n");
+
+        assertTrue(nic.isLinkStateUp());
+    }
 }

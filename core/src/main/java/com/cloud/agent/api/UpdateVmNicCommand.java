@@ -22,6 +22,7 @@ public class UpdateVmNicCommand extends Command {
     String nicMacAddress;
     String instanceName;
     Boolean enabled;
+    Integer networkRateMbps;
 
     @Override
     public boolean executeInSequence() {
@@ -37,6 +38,15 @@ public class UpdateVmNicCommand extends Command {
         this.enabled = enabled;
     }
 
+    /**
+     * @param enabled the NIC's link state, or null to leave it
+     * @param networkRateMbps the NIC's rate in Mbps (0 = unlimited), or null to leave it
+     */
+    public UpdateVmNicCommand(String nicMacAddress, String instanceName, Boolean enabled, Integer networkRateMbps) {
+        this(nicMacAddress, instanceName, enabled);
+        this.networkRateMbps = networkRateMbps;
+    }
+
     public String getNicMacAddress() {
         return nicMacAddress;
     }
@@ -47,5 +57,9 @@ public class UpdateVmNicCommand extends Command {
 
     public Boolean isEnabled() {
         return enabled;
+    }
+
+    public Integer getNetworkRateMbps() {
+        return networkRateMbps;
     }
 }

@@ -33,11 +33,15 @@ import org.libvirt.LibvirtException;
 @ResourceWrapper(handles =  UpdateVmNicCommand.class)
 public final class LibvirtUpdateVmNicCommandWrapper extends CommandWrapper<UpdateVmNicCommand, Answer, LibvirtComputingResource> {
 
+    // libvirt takes interface bandwidth in kilobytes per second
+    private static final int KBYTES_PER_SECOND_PER_MBPS = 125;
+
     @Override
     public Answer execute(UpdateVmNicCommand command, LibvirtComputingResource libvirtComputingResource) {
         String nicMacAddress = command.getNicMacAddress();
         String vmName = command.getVmName();
-        boolean isEnabled = command.isEnabled();
+        Boolean isEnabled = command.isEnabled();
+        Integer networkRateMbps = command.getNetworkRateMbps();
 
         Domain vm = null;
         try {
@@ -46,7 +50,12 @@ public final class LibvirtUpdateVmNicCommandWrapper extends CommandWrapper<Updat
             vm = libvirtComputingResource.getDomain(conn, vmName);
 
             final InterfaceDef nic = libvirtComputingResource.getInterface(conn, vmName, nicMacAddress);
-            nic.setLinkStateUp(isEnabled);
+            if (isEnabled != null) {
+                nic.setLinkStateUp(isEnabled);
+            }
+            if (networkRateMbps != null) {
+                nic.setNetworkRateKBps(networkRateMbps > 0 ? networkRateMbps * KBYTES_PER_SECOND_PER_MBPS : 0);
+            }
             vm.updateDeviceFlags(nic.toString(), Domain.DeviceModifyFlags.LIVE);
 
             return new UpdateVmNicAnswer(command, true, "success");

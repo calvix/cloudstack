@@ -107,6 +107,7 @@ import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.rules.dao.PortForwardingRulesDao;
 import com.cloud.network.vpc.Vpc;
 import com.cloud.network.vpc.VpcGatewayVO;
+import com.cloud.network.vpc.VpcManager;
 import com.cloud.network.vpc.VpcOfferingServiceMapVO;
 import com.cloud.network.vpc.dao.PrivateIpDao;
 import com.cloud.network.vpc.dao.VpcDao;
@@ -141,6 +142,7 @@ import com.cloud.utils.db.SearchCriteria;
 import com.cloud.utils.db.SearchCriteria.Op;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.net.NetUtils;
+import com.cloud.vm.DomainRouterVO;
 import com.cloud.vm.Nic;
 import com.cloud.vm.NicProfile;
 import com.cloud.vm.NicVO;
@@ -148,6 +150,7 @@ import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachine.Type;
 import com.cloud.vm.VirtualMachineManager;
+import com.cloud.vm.dao.DomainRouterDao;
 import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.NicSecondaryIpDao;
 import com.cloud.vm.dao.VMInstanceDao;
@@ -207,6 +210,10 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
     NetworkDomainDao _networkDomainDao;
     @Inject
     VMInstanceDao _vmDao;
+    @Inject
+    DomainRouterDao routerDao;
+    @Inject
+    VpcManager vpcManager;
 
     @Inject
     FirewallRulesDao _firewallDao;
@@ -1193,6 +1200,18 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         }
     }
 
+    /**
+     * @return the networkrate set on the VPC of the given router, or null when the router has no VPC or its VPC has
+     * no networkrate
+     */
+    protected Integer getVpcRouterNetworkRate(long routerId) {
+        final DomainRouterVO router = routerDao.findById(routerId);
+        if (router == null || router.getVpcId() == null) {
+            return null;
+        }
+        return vpcManager.getVpcNetworkRate(router.getVpcId());
+    }
+
     @Override
     public Integer getNetworkRate(long networkId, Long vmId) {
         VMInstanceVO vm = null;
@@ -1205,7 +1224,8 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         // For user VM: For default nic use network rate from the service/compute offering,
         //              or on NULL from vm.network.throttling.rate global setting
         // For router: Get network rate for guest and public networks from the guest network offering
-        //              or on NULL from network.throttling.rate
+        //              or on NULL from network.throttling.rate; a VPC router's public NICs take the VPC's
+        //              networkrate when one is set
         // For others: Use network rate from their network offering,
         //              or on NULL from network.throttling.rate setting at zone > global level
         // http://docs.cloudstack.apache.org/en/latest/adminguide/service_offerings.html#network-throttling
@@ -1224,6 +1244,10 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
                             return _configMgr.getNetworkOfferingNetworkRate(network.getNetworkOfferingId(), network.getDataCenterId());
                         }
                     } else if (TrafficType.Public.equals(network.getTrafficType())) {
+                        final Integer vpcNetworkRate = getVpcRouterNetworkRate(vmId);
+                        if (vpcNetworkRate != null) {
+                            return vpcNetworkRate;
+                        }
                         List<NicVO> routerNics = _nicDao.listByVmId(vmId);
                         for (final Nic routerNic : routerNics) {
                             final NetworkVO nw = _networksDao.findById(routerNic.getNetworkId());

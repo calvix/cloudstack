@@ -74,6 +74,11 @@ public class UpdateVPCCmd extends BaseAsyncCustomIdCmd implements UserCmd {
             type = CommandType.BOOLEAN, since = "4.23.0", authorized = {RoleType.Admin})
     private Boolean keepMacAddressOnPublicNic;
 
+    @Parameter(name = ApiConstants.NETWORKRATE, type = CommandType.INTEGER,
+            description = ApiConstants.PARAMETER_DESCRIPTION_VPC_NETWORK_RATE + " Applied to running virtual routers at once.",
+            since = "24.0")
+    private Integer networkRate;
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
@@ -104,6 +109,10 @@ public class UpdateVPCCmd extends BaseAsyncCustomIdCmd implements UserCmd {
 
     public Boolean getKeepMacAddressOnPublicNic() {
         return keepMacAddressOnPublicNic;
+    }
+
+    public Integer getNetworkRate() {
+        return networkRate;
     }
 
     /////////////////////////////////////////////////////
