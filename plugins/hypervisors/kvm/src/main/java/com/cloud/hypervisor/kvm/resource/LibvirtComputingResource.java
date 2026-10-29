@@ -6802,10 +6802,9 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
     }
 
     /**
-     * A virtual router gets one queue per vCPU and packed virtqueues on every virtio NIC. With a single queue
-     * one host vhost thread copies all of the NIC's packets, which caps a router's throughput whatever its vCPU
-     * count; packed virtqueues cut that thread's per-packet cost. Settings from the VM details win. Switched off
-     * with the agent property {@link AgentProperties#ROUTER_NIC_MULTIQUEUE_ENABLED}.
+     * A virtual router gets one queue per vCPU on every virtio NIC. With a single queue one host vhost thread
+     * copies all of the NIC's packets, which caps a router's throughput whatever its vCPU count. Settings from the
+     * VM details win. Switched off with the agent property {@link AgentProperties#ROUTER_NIC_MULTIQUEUE_ENABLED}.
      */
     public void setRouterNicQueueSettings(VirtualMachine.Type vmType, Integer cpus, InterfaceDef interfaceDef) {
         if (!Boolean.TRUE.equals(routerNicMultiqueueEnabled) || vmType != VirtualMachine.Type.DomainRouter
@@ -6814,9 +6813,6 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         }
         if (cpus != null && cpus > 1 && interfaceDef.getMultiQueueNumber() == null) {
             interfaceDef.setMultiQueueNumber(cpus);
-        }
-        if (interfaceDef.getPackedVirtQueues() == null) {
-            interfaceDef.setPackedVirtQueues(true);
         }
     }
 
