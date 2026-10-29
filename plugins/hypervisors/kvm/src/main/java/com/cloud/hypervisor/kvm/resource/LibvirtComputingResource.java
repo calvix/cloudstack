@@ -620,6 +620,25 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
      */
     private static final String COMMAND_MERGE_SNAPSHOT = "virsh blockcommit %s %s --base %s";
 
+    /**
+     * Reads the libvirt and QEMU versions and hands them to {@link LibvirtVMDef}, whose device XML depends on them
+     * (NIC bandwidth, packed virtqueues, ...). Without this they are only known after the first VM is defined since
+     * the agent started, and XML built before that, for a NIC plug or a live NIC update, silently loses those parts.
+     */
+    protected void readHypervisorVersions(final Connect conn) {
+        try {
+            hvVersion = conn.getVersion();
+            hvVersion = hvVersion % 1000000 / 1000;
+            hypervisorLibvirtVersion = conn.getLibVirVersion();
+            hypervisorQemuVersion = conn.getVersion();
+        } catch (final LibvirtException e) {
+            LOGGER.trace("Ignoring libvirt error.", e);
+            return;
+        }
+        LibvirtVMDef.setGlobalLibvirtVersion(hypervisorLibvirtVersion);
+        LibvirtVMDef.setGlobalQemuVersion(hypervisorQemuVersion);
+    }
+
     public long getHypervisorLibvirtVersion() {
         return hypervisorLibvirtVersion;
     }
@@ -1420,14 +1439,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         }
 
         hypervisorPath = getHypervisorPath(conn);
-        try {
-            hvVersion = conn.getVersion();
-            hvVersion = hvVersion % 1000000 / 1000;
-            hypervisorLibvirtVersion = conn.getLibVirVersion();
-            hypervisorQemuVersion = conn.getVersion();
-        } catch (final LibvirtException e) {
-            LOGGER.trace("Ignoring libvirt error.", e);
-        }
+        readHypervisorVersions(conn);
 
         // Enable/disable IO driver for Qemu (in case it is not set CloudStack can also detect if its supported by qemu)
         enableIoUring = isIoUringEnabled();
