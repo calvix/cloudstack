@@ -5070,7 +5070,8 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
 
     public InterfaceDef getInterface(final Connect conn, final String vmName, final String macAddress) {
         List<InterfaceDef> interfaces = getInterfaces(conn, vmName);
-        return interfaces.stream().filter(interfaceDef -> interfaceDef.getMacAddress().equals(macAddress))
+        // NICs the parser does not know, like direct or vhost-user ones, have no MAC address
+        return interfaces.stream().filter(interfaceDef -> macAddress.equals(interfaceDef.getMacAddress()))
                 .findFirst().orElseThrow(() -> new CloudRuntimeException(String.format("Unable to find NIC with MAC address %s.", macAddress)));
     }
 

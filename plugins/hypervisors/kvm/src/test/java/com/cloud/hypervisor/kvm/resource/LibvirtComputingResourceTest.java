@@ -7659,4 +7659,15 @@ public class LibvirtComputingResourceTest {
         Pair<Integer, Long> result = libvirtComputingResourceSpy.getPeriodAndQuota(cpuQuotaPercentage);
         Assert.assertEquals(expectedResult, result);
     }
+
+    @Test
+    public void getInterfaceSkipsNicsWithoutAMacAddress() {
+        Connect conn = Mockito.mock(Connect.class);
+        InterfaceDef withoutMac = new InterfaceDef();
+        InterfaceDef nic = new InterfaceDef();
+        nic.defBridgeNet("cloudbr1", "vnet0", "1e:00:00:00:00:01", InterfaceDef.NicModel.VIRTIO);
+        Mockito.doReturn(List.of(withoutMac, nic)).when(libvirtComputingResourceSpy).getInterfaces(conn, "r-50-VM");
+
+        Assert.assertSame(nic, libvirtComputingResourceSpy.getInterface(conn, "r-50-VM", "1e:00:00:00:00:01"));
+    }
 }

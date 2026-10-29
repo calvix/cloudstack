@@ -17,6 +17,8 @@
 package com.cloud.hypervisor.kvm.resource.wrapper;
 
 import static org.junit.Assert.assertFalse;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -34,9 +36,12 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.UpdateVmNicCommand;
+import com.cloud.hypervisor.kvm.resource.BridgeVifDriver;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef.InterfaceDef;
+import com.cloud.hypervisor.kvm.resource.OvsVifDriver;
+import com.cloud.network.Networks.TrafficType;
 
 @RunWith(MockitoJUnitRunner.class)
 public class LibvirtUpdateVmNicCommandWrapperTest {
@@ -66,7 +71,14 @@ public class LibvirtUpdateVmNicCommandWrapperTest {
         when(libvirtComputingResource.getInterface(connect, VM_NAME, MAC)).thenReturn(nic);
     }
 
+    private void nicOfTheBridgeVifDriver() {
+        when(libvirtComputingResource.getVifDriver(TrafficType.Public, "cloudbr1")).thenReturn(Mockito.mock(BridgeVifDriver.class));
+    }
+
     private String updatedInterfaceXml(UpdateVmNicCommand command) throws LibvirtException {
+        if (command.getNetworkRateMbps() != null) {
+            nicOfTheBridgeVifDriver();
+        }
         Answer answer = new LibvirtUpdateVmNicCommandWrapper().execute(command, libvirtComputingResource);
         assertTrue(answer.getResult());
         ArgumentCaptor<String> xml = ArgumentCaptor.forClass(String.class);
@@ -96,6 +108,17 @@ public class LibvirtUpdateVmNicCommandWrapperTest {
         String xml = updatedInterfaceXml(new UpdateVmNicCommand(MAC, VM_NAME, null, 2000));
 
         assertTrue(xml.contains("<link state='down'/>"));
+    }
+
+    @Test
+    public void networkRateIsNotChangedLiveOnANicOfAnotherVifDriver() throws LibvirtException {
+        // the parsed NIC lacks what such drivers add, like an Open vSwitch port and its VLAN tag
+        when(libvirtComputingResource.getVifDriver(TrafficType.Public, "cloudbr1")).thenReturn(Mockito.mock(OvsVifDriver.class));
+
+        Answer answer = new LibvirtUpdateVmNicCommandWrapper().execute(new UpdateVmNicCommand(MAC, VM_NAME, null, 2000), libvirtComputingResource);
+
+        assertFalse(answer.getResult());
+        verify(domain, never()).updateDeviceFlags(anyString(), Mockito.anyInt());
     }
 
     @Test
