@@ -4214,7 +4214,8 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
             logger.warn("Failed to cleanup Network ACLs as a part of network {} cleanup due to resourceUnavailable ", network, ex);
         }
 
-        //release all ip addresses
+        //release all ip addresses, except the VPC IPs that other networks' rules still use
+        rebindVpcIpsUsedByOtherNetworks(network);
         final List<IPAddressVO> ipsToRelease = _ipAddressDao.listByAssociatedNetwork(networkId, null);
         for (final IPAddressVO ipToRelease : ipsToRelease) {
             if (ipToRelease.getVpcId() == null) {
@@ -4245,6 +4246,47 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
         annotationDao.removeByEntityType(AnnotationService.EntityType.NETWORK.name(), network.getUuid());
 
         return success;
+    }
+
+    /**
+     * In a VPC with conserve mode, one public IP can carry rules of several networks while it is bound to one of
+     * them. When that network is shut down or deleted, such an IP is bound to another network whose rules it carries,
+     * so it stays on the router; releasing it would take the other networks' rules down with it.
+     *
+     * @return the IPs that were bound to another network
+     */
+    protected List<IPAddressVO> rebindVpcIpsUsedByOtherNetworks(final Network network) {
+        final List<IPAddressVO> reboundIps = new ArrayList<>();
+        if (network.getVpcId() == null) {
+            return reboundIps;
+        }
+        for (final IPAddressVO ip : _ipAddressDao.listByAssociatedNetwork(network.getId(), null)) {
+            if (ip.getVpcId() == null) {
+                continue;
+            }
+            final Long otherNetworkId = findOtherNetworkWithRulesOnIp(ip, network.getId());
+            if (otherNetworkId == null) {
+                continue;
+            }
+            ip.setAssociatedWithNetworkId(otherNetworkId);
+            _ipAddressDao.update(ip.getId(), ip);
+            reboundIps.add(ip);
+            logger.info("Bound VPC public IP {} to network with ID {}, whose rules it carries, as network {} goes away", ip, otherNetworkId, network);
+        }
+        return reboundIps;
+    }
+
+    /**
+     * @return the ID of a network, other than the given one, that has a rule on the IP that is not being revoked;
+     * null when there is none
+     */
+    protected Long findOtherNetworkWithRulesOnIp(final IPAddressVO ip, final long networkId) {
+        return _firewallDao.listByIp(ip.getId()).stream()
+                .filter(rule -> rule.getState() != FirewallRule.State.Revoke)
+                .map(FirewallRuleVO::getNetworkId)
+                .filter(ruleNetworkId -> ruleNetworkId != null && ruleNetworkId != networkId)
+                .findFirst()
+                .orElse(null);
     }
 
     private boolean shutdownNetworkResources(final Network network, final Account caller, final long callerUserId) {
@@ -4391,6 +4433,9 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
             logger.warn("Failed to disable static nats as part of shutdownNetworkRules for network {}", network);
             success = false;
         }
+
+        // Keep the VPC IPs that other networks' rules still use on the router
+        rebindVpcIpsUsedByOtherNetworks(network);
 
         // Get all ip addresses, mark as releasing and release them on the backend
         final List<IPAddressVO> userIps = _ipAddressDao.listByAssociatedNetwork(network.getId(), null);

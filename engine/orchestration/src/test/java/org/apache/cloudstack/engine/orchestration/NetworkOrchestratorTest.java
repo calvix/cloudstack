@@ -66,6 +66,7 @@ import com.cloud.network.Network.Service;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.Networks.TrafficType;
 import com.cloud.network.dao.IPAddressDao;
+import com.cloud.network.dao.FirewallRulesDao;
 import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
@@ -76,6 +77,8 @@ import com.cloud.network.element.DhcpServiceProvider;
 import com.cloud.network.element.NetworkElement;
 import com.cloud.network.guru.GuestNetworkGuru;
 import com.cloud.network.guru.NetworkGuru;
+import com.cloud.network.rules.FirewallRule;
+import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.vpc.VpcManager;
 import com.cloud.network.vpc.VpcVO;
 import com.cloud.offerings.NetworkOfferingVO;
@@ -133,6 +136,7 @@ public class NetworkOrchestratorTest extends TestCase {
         testOrchestrator._ntwkSrvcDao = mock(NetworkServiceMapDao.class);
         testOrchestrator._nicIpAliasDao = mock(NicIpAliasDao.class);
         testOrchestrator._ipAddressDao = mock(IPAddressDao.class);
+        testOrchestrator._firewallDao = mock(FirewallRulesDao.class);
         testOrchestrator._vlanDao = mock(VlanDao.class);
         testOrchestrator._networkModel = mock(NetworkModel.class);
         testOrchestrator._nicExtraDhcpOptionDao = mock(NicExtraDhcpOptionDao.class);
@@ -1072,5 +1076,64 @@ public class NetworkOrchestratorTest extends TestCase {
 
         assertNotNull(result);
         assertEquals(1, result.size());
+    }
+
+    private IPAddressVO vpcIpOnNetwork(long ipId, long networkId, FirewallRuleVO... rules) {
+        IPAddressVO ip = mock(IPAddressVO.class);
+        when(ip.getId()).thenReturn(ipId);
+        when(ip.getVpcId()).thenReturn(9L);
+        when(testOrchestrator._firewallDao.listByIp(ipId)).thenReturn(List.of(rules));
+        return ip;
+    }
+
+    private FirewallRuleVO rule(Long networkId, FirewallRule.State state) {
+        FirewallRuleVO rule = mock(FirewallRuleVO.class);
+        when(rule.getNetworkId()).thenReturn(networkId);
+        when(rule.getState()).thenReturn(state);
+        return rule;
+    }
+
+    private Network vpcNetwork(long networkId) {
+        Network network = mock(Network.class);
+        when(network.getId()).thenReturn(networkId);
+        when(network.getVpcId()).thenReturn(9L);
+        return network;
+    }
+
+    @Test
+    public void vpcIpWithRulesOfAnotherNetworkIsBoundToThatNetwork() {
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(1L, FirewallRule.State.Revoke), rule(2L, FirewallRule.State.Active));
+        when(testOrchestrator._ipAddressDao.listByAssociatedNetwork(1L, null)).thenReturn(List.of(ip));
+
+        List<IPAddressVO> rebound = testOrchestrator.rebindVpcIpsUsedByOtherNetworks(vpcNetwork(1L));
+
+        assertEquals(List.of(ip), rebound);
+        Mockito.verify(ip).setAssociatedWithNetworkId(2L);
+        Mockito.verify(testOrchestrator._ipAddressDao).update(10L, ip);
+    }
+
+    @Test
+    public void vpcIpWithOnlyRulesOfTheNetworkGoingAwayIsNotRebound() {
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(1L, FirewallRule.State.Active), rule(null, FirewallRule.State.Active));
+        when(testOrchestrator._ipAddressDao.listByAssociatedNetwork(1L, null)).thenReturn(List.of(ip));
+
+        Assert.assertTrue(testOrchestrator.rebindVpcIpsUsedByOtherNetworks(vpcNetwork(1L)).isEmpty());
+        Mockito.verify(ip, Mockito.never()).setAssociatedWithNetworkId(Mockito.any());
+    }
+
+    @Test
+    public void revokedRuleOfAnotherNetworkDoesNotKeepTheIp() {
+        IPAddressVO ip = vpcIpOnNetwork(10L, 1L, rule(2L, FirewallRule.State.Revoke));
+
+        Assert.assertNull(testOrchestrator.findOtherNetworkWithRulesOnIp(ip, 1L));
+    }
+
+    @Test
+    public void networkOutsideAVpcRebindsNothing() {
+        Network network = mock(Network.class);
+        when(network.getVpcId()).thenReturn(null);
+
+        Assert.assertTrue(testOrchestrator.rebindVpcIpsUsedByOtherNetworks(network).isEmpty());
+        Mockito.verify(testOrchestrator._ipAddressDao, Mockito.never()).listByAssociatedNetwork(Mockito.anyLong(), Mockito.any());
     }
 }
