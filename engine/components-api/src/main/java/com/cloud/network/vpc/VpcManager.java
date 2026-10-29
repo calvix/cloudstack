@@ -48,7 +48,7 @@ public interface VpcManager {
 
     ConfigKey<Integer> VpcMaxNetworkRate = new ConfigKey<>(Integer.class,
             "vpc.max.network.rate",
-            ConfigKey.CATEGORY_NETWORK,
+            ConfigKey.CATEGORY_SYSTEM,
             "0",
             "The highest networkrate in Mbps a non-admin caller can set on a VPC of the account. 0 means such callers cannot set networkrate.",
             true,

@@ -1209,7 +1209,12 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         if (router == null || router.getVpcId() == null) {
             return null;
         }
-        return vpcManager.getVpcNetworkRate(router.getVpcId());
+        final Integer networkRate = vpcManager.getVpcNetworkRate(router.getVpcId());
+        // 0 is unlimited, which every hypervisor takes as -1, the same as for an offering rate of 0
+        if (networkRate != null && networkRate == 0) {
+            return -1;
+        }
+        return networkRate;
     }
 
     @Override

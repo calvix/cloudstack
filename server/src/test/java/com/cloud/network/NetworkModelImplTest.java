@@ -519,6 +519,15 @@ public class NetworkModelImplTest {
     }
 
     @Test
+    public void vpcRouterPublicNicWithAVpcNetworkRateOfZeroIsUnlimited() {
+        preparePublicNicOfRouter(5L);
+        when(vpcManager.getVpcNetworkRate(5L)).thenReturn(0);
+
+        // -1 is unlimited for every hypervisor, the same as an offering rate of 0
+        assertEquals(Integer.valueOf(-1), networkModel.getNetworkRate(1L, 10L));
+    }
+
+    @Test
     public void routerOutsideAVpcHasNoVpcNetworkRate() {
         DomainRouterVO router = mock(DomainRouterVO.class);
         when(router.getVpcId()).thenReturn(null);
