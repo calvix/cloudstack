@@ -52,6 +52,9 @@ import com.cloud.dc.DataCenterVO;
 import com.cloud.dc.VlanVO;
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.network.addr.PublicIp;
+import com.cloud.network.rules.FirewallRuleVO;
+import com.cloud.network.rules.FirewallRule;
+import com.cloud.network.dao.FirewallRulesDao;
 import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
@@ -122,6 +125,9 @@ public class NetworkModelImplTest {
     private EntityManager entityManager;
     @Mock
     private ConfigurationManager configurationManager;
+
+    @Mock
+    private FirewallRulesDao firewallRulesDao;
 
     @Spy
     @InjectMocks
@@ -535,5 +541,33 @@ public class NetworkModelImplTest {
 
         assertNull(networkModel.getVpcRouterNetworkRate(10L));
         Mockito.verify(vpcManager, Mockito.never()).getVpcNetworkRate(Mockito.anyLong());
+    }
+
+    private FirewallRuleVO firewallRuleOfNetwork(Long networkId) {
+        FirewallRuleVO rule = mock(FirewallRuleVO.class);
+        when(rule.getPurpose()).thenReturn(FirewallRule.Purpose.Firewall);
+        when(rule.getNetworkId()).thenReturn(networkId);
+        return rule;
+    }
+
+    @Test
+    public void vpcFirewallRuleGivesAVpcIpNoPurposeOnItsNetwork() {
+        PublicIp ip = mock(PublicIp.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getVpcId()).thenReturn(5L);
+        FirewallRuleVO vpcFirewallRule = firewallRuleOfNetwork(null);
+        when(firewallRulesDao.listByIpAndNotRevoked(10L)).thenReturn(List.of(vpcFirewallRule));
+
+        assertTrue(networkModel.getPublicIpPurposeInRules(ip, false, true).isEmpty());
+    }
+
+    @Test
+    public void firewallRuleOfANetworkIsAPurposeOfItsIp() {
+        PublicIp ip = mock(PublicIp.class);
+        when(ip.getId()).thenReturn(10L);
+        FirewallRuleVO firewallRule = firewallRuleOfNetwork(2L);
+        when(firewallRulesDao.listByIpAndNotRevoked(10L)).thenReturn(List.of(firewallRule));
+
+        assertTrue(networkModel.getPublicIpPurposeInRules(ip, false, true).contains(FirewallRule.Purpose.Firewall));
     }
 }

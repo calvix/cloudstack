@@ -358,6 +358,10 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         }
 
         for (FirewallRuleVO rule : rules) {
+            if (ip.getVpcId() != null && rule.getNetworkId() == null) {
+                // a VPC firewall rule does not use the IP on a network, see VpcManager.isIpAllocatedToVpc
+                continue;
+            }
             if (rule.getPurpose() != Purpose.Firewall || includingFirewall) {
                 result.add(rule.getPurpose());
             }
