@@ -22,8 +22,10 @@ package com.cloud.hypervisor.kvm.resource.wrapper;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.UpdateVmNicAnswer;
 import com.cloud.agent.api.UpdateVmNicCommand;
+import com.cloud.hypervisor.kvm.resource.BridgeVifDriver;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef.InterfaceDef;
+import com.cloud.network.Networks.TrafficType;
 import com.cloud.resource.CommandWrapper;
 import com.cloud.resource.ResourceWrapper;
 import org.libvirt.Connect;
@@ -54,6 +56,12 @@ public final class LibvirtUpdateVmNicCommandWrapper extends CommandWrapper<Updat
                 nic.setLinkStateUp(isEnabled);
             }
             if (networkRateMbps != null) {
+                // the NIC is written back as parsed, which keeps only what the bridge VIF driver writes; others add
+                // more, like an Open vSwitch port and its VLAN tag
+                if (!(libvirtComputingResource.getVifDriver(TrafficType.Public, nic.getBrName()) instanceof BridgeVifDriver)) {
+                    return new UpdateVmNicAnswer(command, false, String.format("The network rate of NIC %s can only be changed live with the bridge VIF " +
+                            "driver; it applies at the next start of %s", nicMacAddress, vmName));
+                }
                 nic.setNetworkRateKBps(networkRateMbps > 0 ? networkRateMbps * KBYTES_PER_SECOND_PER_MBPS : 0);
             }
             vm.updateDeviceFlags(nic.toString(), Domain.DeviceModifyFlags.LIVE);
