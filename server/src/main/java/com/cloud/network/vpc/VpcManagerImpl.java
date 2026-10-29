@@ -2026,7 +2026,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
 
         boolean restartRequired = checkAndUpdateRouterSourceNatIp(vpcToUpdate, sourceNatIp);
 
-        if (networkRate != null && !networkRate.equals(getVpcNetworkRate(vpcId))) {
+        if (networkRate != null) {
+            // applied even when unchanged, so a retry reaches routers that a failed attempt missed
             updateVpcNetworkRate(vpcToUpdate, networkRate);
         }
 
