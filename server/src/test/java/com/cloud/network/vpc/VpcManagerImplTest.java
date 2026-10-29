@@ -811,4 +811,19 @@ public class VpcManagerImplTest {
 
         manager.updateVpcNetworkRate(vpc, 2000);
     }
+
+    @Test
+    public void updateVpcAppliesAnUnchangedNetworkRateAgain() throws Exception {
+        VpcVO vpcVO = Mockito.mock(VpcVO.class);
+        Mockito.when(vpcVO.getAccountId()).thenReturn(ACCOUNT_ID);
+        Mockito.when(vpcDao.findById(1L)).thenReturn(vpcVO);
+        Mockito.when(vpcDao.createForUpdate(1L)).thenReturn(vpcVO);
+        Mockito.when(accountManager.isRootAdmin(Mockito.anyLong())).thenReturn(true);
+        VpcManagerImpl spy = Mockito.spy(manager);
+        Mockito.doNothing().when(spy).updateVpcNetworkRate(Mockito.any(), Mockito.anyInt());
+
+        spy.updateVpc(1L, null, null, null, null, null, null, null, 2000);
+
+        Mockito.verify(spy).updateVpcNetworkRate(vpcVO, 2000);
+    }
 }
