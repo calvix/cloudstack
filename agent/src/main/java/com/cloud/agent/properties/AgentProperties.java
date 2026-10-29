@@ -630,6 +630,14 @@ public class AgentProperties{
     public static final Property<Boolean> ENABLE_MANUALLY_SETTING_CPU_TOPOLOGY_ON_KVM_VM = new Property<>("enable.manually.setting.cpu.topology.on.kvm.vm", true);
 
     /**
+     * Gives every virtio NIC of a virtual router one queue per vCPU and packed virtqueues (where QEMU and libvirt
+     * support them), at start and on hot-plug. Queue settings from the VM details still win. <br>
+     * Data type: Boolean.<br>
+     * Default value: <code>true</code>
+     */
+    public static final Property<Boolean> ROUTER_NIC_MULTIQUEUE_ENABLED = new Property<>("router.nic.multiqueue.enabled", true);
+
+    /**
      * Manually sets the host CPU speed (in MHz), in cases where CPU scaling support detects the value is wrong. <br>
      * Data type: Integer.<br>
      * Default value: <code>0</code>

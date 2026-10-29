@@ -322,6 +322,58 @@ public class LibvirtComputingResourceTest {
         LibvirtComputingResource.LOGGER = loggerMock;
     }
 
+    private InterfaceDef virtioNic() {
+        final InterfaceDef nic = new InterfaceDef();
+        nic.defBridgeNet("br0", null, "02:00:00:00:00:01", InterfaceDef.NicModel.VIRTIO);
+        return nic;
+    }
+
+    @Test
+    public void routerNicGetsOneQueuePerVcpu() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertEquals(Integer.valueOf(4), nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void routerNicGetsPackedVirtqueues() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 1, nic);
+        assertEquals(Boolean.TRUE, nic.getPackedVirtQueues());
+    }
+
+    @Test
+    public void userVmNicKeepsItsQueueSetting() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.User, 4, nic);
+        assertNull(nic.getMultiQueueNumber());
+        assertNull(nic.getPackedVirtQueues());
+    }
+
+    @Test
+    public void routerNicQueueCountFromDetailsWins() {
+        final InterfaceDef nic = virtioNic();
+        nic.setMultiQueueNumber(2);
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertEquals(Integer.valueOf(2), nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void routerNicUntouchedWhenSwitchedOff() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.routerNicMultiqueueEnabled = false;
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertNull(nic.getMultiQueueNumber());
+        assertNull(nic.getPackedVirtQueues());
+    }
+
+    @Test
+    public void singleVcpuRouterNicStaysSingleQueue() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 1, nic);
+        assertNull(nic.getMultiQueueNumber());
+    }
+
     /**
      This test tests if the Agent can handle a vmSpec coming
      from a <=4.1 management server.
