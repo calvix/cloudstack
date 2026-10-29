@@ -41,6 +41,20 @@ import com.cloud.user.Account;
 import org.apache.cloudstack.framework.config.ConfigKey;
 
 public interface VpcManager {
+    /**
+     * VPC detail holding the rate in Mbps for the public interfaces of the VPC's virtual routers (0 = unlimited).
+     */
+    String NETWORK_RATE_DETAIL = "networkrate";
+
+    ConfigKey<Integer> VpcMaxNetworkRate = new ConfigKey<>(Integer.class,
+            "vpc.max.network.rate",
+            ConfigKey.CATEGORY_NETWORK,
+            "0",
+            "The highest networkrate in Mbps a non-admin caller can set on a VPC of the account. 0 means such callers cannot set networkrate.",
+            true,
+            ConfigKey.Scope.Account,
+            null);
+
     ConfigKey<Boolean> VpcTierNamePrepend = new ConfigKey<>(Boolean.class,
             "vpc.tier.name.prepend",
             ConfigKey.CATEGORY_NETWORK,
@@ -65,6 +79,12 @@ public interface VpcManager {
      * @return
      */
     public List<? extends Network> getVpcNetworks(long vpcId);
+
+    /**
+     * @return the networkrate in Mbps set on the VPC for the public interfaces of its virtual routers (0 = unlimited),
+     * or null when none is set
+     */
+    Integer getVpcNetworkRate(long vpcId);
 
     /**
      * Returns all existing VPCs for a given account

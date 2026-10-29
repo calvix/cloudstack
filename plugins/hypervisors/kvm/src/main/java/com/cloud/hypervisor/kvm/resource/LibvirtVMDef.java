@@ -1778,6 +1778,14 @@ public class LibvirtVMDef {
             return _linkStateUp;
         }
 
+        public void setNetworkRateKBps(int networkRateKBps) {
+            _networkRateKBps = networkRateKBps;
+        }
+
+        public int getNetworkRateKBps() {
+            return _networkRateKBps;
+        }
+
         public String getDpdkSourcePort() {
             return _dpdkSourcePort;
         }

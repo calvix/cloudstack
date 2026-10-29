@@ -71,6 +71,16 @@ import com.cloud.utils.Pair;
 import com.cloud.utils.net.Ip;
 import com.cloud.vm.Nic;
 import com.cloud.vm.NicProfile;
+import com.cloud.configuration.ConfigurationManager;
+import com.cloud.network.Networks.TrafficType;
+import com.cloud.network.vpc.VpcManager;
+import com.cloud.utils.db.EntityManager;
+import com.cloud.vm.DomainRouterVO;
+import com.cloud.vm.VMInstanceVO;
+import com.cloud.vm.dao.DomainRouterDao;
+import com.cloud.vm.dao.NicDao;
+import com.cloud.vm.dao.VMInstanceDao;
+import com.cloud.vm.NicVO;
 import com.cloud.vm.VirtualMachine;
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
@@ -100,6 +110,18 @@ public class NetworkModelImplTest {
 
     @Mock
     private PhysicalNetworkServiceProviderDao physicalNetworkServiceProviderDao;
+    @Mock
+    private DomainRouterDao routerDao;
+    @Mock
+    private NicDao _nicDao;
+    @Mock
+    private VpcManager vpcManager;
+    @Mock
+    private VMInstanceDao vmInstanceDao;
+    @Mock
+    private EntityManager entityManager;
+    @Mock
+    private ConfigurationManager configurationManager;
 
     @Spy
     @InjectMocks
@@ -120,6 +142,12 @@ public class NetworkModelImplTest {
         networkModel.networkExtensionElement = networkExtensionElement;
         networkModel._physicalNetworkDao = physicalNetworkDao;
         networkModel._pNSPDao = physicalNetworkServiceProviderDao;
+        networkModel.routerDao = routerDao;
+        networkModel._nicDao = _nicDao;
+        networkModel.vpcManager = vpcManager;
+        networkModel._vmDao = vmInstanceDao;
+        networkModel._entityMgr = entityManager;
+        networkModel._configMgr = configurationManager;
         Mockito.lenient().when(extensionHelper.isNetworkExtensionProvider(Mockito.anyString())).thenReturn(false);
     }
 
@@ -451,5 +479,52 @@ public class NetworkModelImplTest {
 
         Mockito.verify(physicalNetworkServiceProviderDao, Mockito.times(1)).listAll();
         Mockito.verify(physicalNetworkServiceProviderDao, Mockito.never()).listBy(Mockito.anyLong());
+    }
+
+    private void preparePublicNicOfRouter(Long vpcId) {
+        VMInstanceVO vm = mock(VMInstanceVO.class);
+        when(vm.getType()).thenReturn(VirtualMachine.Type.DomainRouter);
+        when(vmInstanceDao.findById(10L)).thenReturn(vm);
+        NetworkVO publicNetwork = mock(NetworkVO.class);
+        when(publicNetwork.getTrafficType()).thenReturn(TrafficType.Public);
+        when(publicNetwork.getNetworkOfferingId()).thenReturn(3L);
+        Mockito.doReturn(publicNetwork).when(networkModel).getNetwork(1L);
+        DomainRouterVO router = mock(DomainRouterVO.class);
+        when(router.getVpcId()).thenReturn(vpcId);
+        when(routerDao.findById(10L)).thenReturn(router);
+    }
+
+    @Test
+    public void vpcRouterPublicNicTakesTheVpcNetworkRate() {
+        preparePublicNicOfRouter(5L);
+        when(vpcManager.getVpcNetworkRate(5L)).thenReturn(2000);
+
+        assertEquals(Integer.valueOf(2000), networkModel.getNetworkRate(1L, 10L));
+    }
+
+    @Test
+    public void vpcRouterPublicNicWithoutAVpcNetworkRateTakesTheFirstGuestNetworkOfferingRate() {
+        preparePublicNicOfRouter(5L);
+        when(vpcManager.getVpcNetworkRate(5L)).thenReturn(null);
+        NicVO guestNic = mock(NicVO.class);
+        when(guestNic.getNetworkId()).thenReturn(2L);
+        when(_nicDao.listByVmId(10L)).thenReturn(List.of(guestNic));
+        NetworkVO guestNetwork = mock(NetworkVO.class);
+        when(guestNetwork.getTrafficType()).thenReturn(TrafficType.Guest);
+        when(guestNetwork.getNetworkOfferingId()).thenReturn(4L);
+        when(_networksDao.findById(2L)).thenReturn(guestNetwork);
+        when(configurationManager.getNetworkOfferingNetworkRate(Mockito.eq(4L), Mockito.any())).thenReturn(200);
+
+        assertEquals(Integer.valueOf(200), networkModel.getNetworkRate(1L, 10L));
+    }
+
+    @Test
+    public void routerOutsideAVpcHasNoVpcNetworkRate() {
+        DomainRouterVO router = mock(DomainRouterVO.class);
+        when(router.getVpcId()).thenReturn(null);
+        when(routerDao.findById(10L)).thenReturn(router);
+
+        assertNull(networkModel.getVpcRouterNetworkRate(10L));
+        Mockito.verify(vpcManager, Mockito.never()).getVpcNetworkRate(Mockito.anyLong());
     }
 }
