@@ -591,6 +591,8 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
 
     protected Boolean enableManuallySettingCpuTopologyOnKvmVm = AgentPropertiesFileHandler.getPropertyValue(AgentProperties.ENABLE_MANUALLY_SETTING_CPU_TOPOLOGY_ON_KVM_VM);
 
+    protected Boolean routerNicMultiqueueEnabled = AgentPropertiesFileHandler.getPropertyValue(AgentProperties.ROUTER_NIC_MULTIQUEUE_ENABLED);
+
     protected LibvirtDomainXMLParser parser = new LibvirtDomainXMLParser();
 
     private boolean isTungstenEnabled = false;
@@ -4117,6 +4119,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         if (vmSpec.getDetails() != null) {
             setInterfaceDefQueueSettings(vmSpec.getDetails(), vmSpec.getCpus(), interfaceDef);
         }
+        setRouterNicQueueSettings(vmSpec.getType(), vmSpec.getCpus(), interfaceDef);
         vm.getDevices().addDevice(interfaceDef);
     }
 
@@ -6834,6 +6837,25 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
             logger.debug("Manually deleted unused snapshot file [{}].", snapshotPath);
         } catch (IOException ex) {
             throw new CloudRuntimeException(String.format("Unable to manually delete unused snapshot file [%s] due to [%s].", snapshotPath, ex.getMessage()));
+        }
+    }
+
+    /**
+     * A virtual router gets one queue per vCPU and packed virtqueues on every virtio NIC. With a single queue
+     * one host vhost thread copies all of the NIC's packets, which caps a router's throughput whatever its vCPU
+     * count; packed virtqueues cut that thread's per-packet cost. Settings from the VM details win. Switched off
+     * with the agent property {@link AgentProperties#ROUTER_NIC_MULTIQUEUE_ENABLED}.
+     */
+    public void setRouterNicQueueSettings(VirtualMachine.Type vmType, Integer cpus, InterfaceDef interfaceDef) {
+        if (!Boolean.TRUE.equals(routerNicMultiqueueEnabled) || vmType != VirtualMachine.Type.DomainRouter
+                || interfaceDef.getModel() != InterfaceDef.NicModel.VIRTIO) {
+            return;
+        }
+        if (cpus != null && cpus > 1 && interfaceDef.getMultiQueueNumber() == null) {
+            interfaceDef.setMultiQueueNumber(cpus);
+        }
+        if (interfaceDef.getPackedVirtQueues() == null) {
+            interfaceDef.setPackedVirtQueues(true);
         }
     }
 
