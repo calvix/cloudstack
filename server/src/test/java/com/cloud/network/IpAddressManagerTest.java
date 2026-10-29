@@ -664,4 +664,20 @@ public class IpAddressManagerTest {
         Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
         Mockito.verify(ipAddressDao).unassignIpAddress(10L);
     }
+
+    @Test
+    public void disassociatePublicIpAddressKeepsAnIpOfARemovedNetworkWhoseRulesWereNotCleanedUp() throws ResourceUnavailableException {
+        IPAddressVO ip = mock(IPAddressVO.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getAssociatedWithNetworkId()).thenReturn(20L);
+        when(ip.getVpcId()).thenReturn(30L);
+        when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
+        Mockito.doReturn(false).when(ipAddressManager).cleanupIpResources(ip, 1L, account);
+        Mockito.doReturn(ip).when(ipAddressManager).markIpAsUnavailable(10L);
+        when(networkDao.findById(20L)).thenReturn(null);
+
+        assertFalse(ipAddressManager.disassociatePublicIpAddress(ip, 1L, account));
+
+        Mockito.verify(ipAddressDao, Mockito.never()).unassignIpAddress(10L);
+    }
 }

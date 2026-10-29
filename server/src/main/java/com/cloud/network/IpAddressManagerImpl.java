@@ -837,6 +837,9 @@ public class IpAddressManagerImpl extends ManagerBase implements IpAddressManage
                 } catch (ResourceUnavailableException e) {
                     throw new CloudRuntimeException("We should never get to here because we used true when applyIpAssociations", e);
                 }
+            } else if (ip.getAssociatedWithNetworkId() != null && !success) {
+                // keep it out of the pool while rules of the removed network are still on it
+                logger.warn("Not releasing IP {}, as its rules could not be cleaned up", ip);
             } else if (ip.getState() == State.Releasing) {
                 publicIpQuarantine = addPublicIpAddressToQuarantine(ipToBeDisassociated, caller.getDomainId());
                 _ipAddressDao.unassignIpAddress(ip.getId());
