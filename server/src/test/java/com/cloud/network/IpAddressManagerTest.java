@@ -40,6 +40,7 @@ import com.cloud.network.vo.PublicIpQuarantineVO;
 import com.cloud.user.Account;
 import com.cloud.user.AccountManager;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -121,6 +122,9 @@ public class IpAddressManagerTest {
 
     @Mock
     VlanDao vlanDao;
+
+    @Mock
+    AnnotationDao annotationDao;
 
     final long dummyID = 1L;
 
@@ -639,5 +643,25 @@ public class IpAddressManagerTest {
                 Collections.singletonList(rule), FirewallRule.Purpose.Firewall, applier, true);
 
         assertFalse(result);
+    }
+
+    @Test
+    public void disassociatePublicIpAddressReleasesAnIpStillBoundToARemovedNetwork() throws ResourceUnavailableException {
+        IPAddressVO ip = mock(IPAddressVO.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getAssociatedWithNetworkId()).thenReturn(20L);
+        when(ip.getVpcId()).thenReturn(30L);
+        when(ip.getState()).thenReturn(IpAddress.State.Releasing);
+        when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
+        Mockito.doReturn(true).when(ipAddressManager).cleanupIpResources(ip, 1L, account);
+        Mockito.doReturn(ip).when(ipAddressManager).markIpAsUnavailable(10L);
+        Mockito.doReturn(null).when(ipAddressManager).addPublicIpAddressToQuarantine(Mockito.any(), Mockito.any());
+        // findById skips removed networks
+        when(networkDao.findById(20L)).thenReturn(null);
+
+        assertTrue(ipAddressManager.disassociatePublicIpAddress(ip, 1L, account));
+
+        Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
+        Mockito.verify(ipAddressDao).unassignIpAddress(10L);
     }
 }

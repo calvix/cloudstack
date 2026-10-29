@@ -3818,7 +3818,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
 
     @Override
     public void unassignIPFromVpcNetwork(final IPAddressVO ip, final Network network) {
-        if (isIpAllocatedToVpc(ip)) {
+        if (isIpUsedByVpcNetworkRules(ip)) {
             return;
         }
 
@@ -3845,6 +3845,16 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             throw new CloudRuntimeException(String.format("Failed to apply ip associations for network %s as a part of unassigning ip %s from vpc", network, ip));
         }
         logger.debug("Successfully released VPC ip address " + ip + " back to VPC pool ");
+    }
+
+    /**
+     * Whether a VPC IP still needs its network association: it has static NAT, or a rule that belongs to a network
+     * (port forwarding, load balancing, static NAT). VPC firewall rules are applied through the VPC and have no network,
+     * so they do not hold the association; otherwise deleting the network leaves the IP bound to a removed network.
+     */
+    protected boolean isIpUsedByVpcNetworkRules(final IpAddress ip) {
+        return ip != null && ip.getVpcId() != null
+                && (ip.isOneToOneNat() || _firewallDao.listByIp(ip.getId()).stream().anyMatch(rule -> rule.getNetworkId() != null));
     }
 
     @Override
