@@ -66,8 +66,10 @@ public final class LibvirtPlugNicCommandWrapper extends CommandWrapper<PlugNicCo
             if (command.getDetails() != null) {
                 libvirtComputingResource.setInterfaceDefQueueSettings(command.getDetails(), null, interfaceDef);
             }
-            final DomainInfo domainInfo = vm.getInfo();
-            libvirtComputingResource.setRouterNicQueueSettings(vmType, domainInfo == null ? null : domainInfo.nrVirtCpu, interfaceDef);
+            if (vmType == VirtualMachine.Type.DomainRouter) {
+                final DomainInfo domainInfo = vm.getInfo();
+                libvirtComputingResource.setRouterNicQueueSettings(vmType, domainInfo == null ? null : domainInfo.nrVirtCpu, interfaceDef);
+            }
             vm.attachDevice(interfaceDef.toString());
 
             // apply default network rules on new nic

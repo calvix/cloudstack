@@ -1807,10 +1807,6 @@ public class LibvirtVMDef {
             return _multiQueueNumber;
         }
 
-        public Boolean getPackedVirtQueues() {
-            return _packedVirtQueues;
-        }
-
         public void setNetworkRateKBps(int networkRateKBps) {
             _networkRateKBps = networkRateKBps;
         }
