@@ -279,6 +279,11 @@ public class LibvirtDomainXMLParser {
                     def.setLinkStateUp(false);
                 }
 
+                // without it a live update of the interface would ask libvirt to change the ROM BAR, which it refuses
+                if ("off".equalsIgnoreCase(getAttrValue("rom", "bar", nic))) {
+                    def.setPxeDisable(true);
+                }
+
                 interfaces.add(def);
             }
 
