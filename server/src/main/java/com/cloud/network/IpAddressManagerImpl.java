@@ -608,12 +608,25 @@ public class IpAddressManagerImpl extends ManagerBase implements IpAddressManage
                 Long activeCount = null;
                 Long addCount = null;
 
-                totalCount = _firewallDao.countRulesByIpId(ip.getId());
-                if (postApplyRules) {
-                    revokeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Revoke);
+                if (ip.getVpcId() != null) {
+                    // VPC firewall rules have no network and do not need the IP on the router, see isIpAllocatedToVpc
+                    final List<FirewallRuleVO> rules = _firewallDao.listByIp(ip.getId()).stream()
+                            .filter(rule -> rule.getNetworkId() != null).collect(Collectors.toList());
+                    totalCount = (long) rules.size();
+                    if (postApplyRules) {
+                        revokeCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Revoke).count();
+                    } else {
+                        activeCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Active).count();
+                        addCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Add).count();
+                    }
                 } else {
-                    activeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Active);
-                    addCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Add);
+                    totalCount = _firewallDao.countRulesByIpId(ip.getId());
+                    if (postApplyRules) {
+                        revokeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Revoke);
+                    } else {
+                        activeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Active);
+                        addCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Add);
+                    }
                 }
 
                 if (totalCount == null || totalCount.longValue() == 0L) {
