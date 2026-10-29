@@ -227,6 +227,10 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     public static final String CAPABILITYVALUE = "capabilityvalue";
     public static final String TRUE_VALUE = "true";
     public static final String FALSE_VALUE = "false";
+    /** networkrate that returns a VPC to the rate of its network offering; root admins only */
+    public static final int RESET_VPC_NETWORK_RATE = -1;
+    /** the highest networkrate every hypervisor can take: KVM and XenServer multiply it into an int of kilobytes */
+    public static final int MAX_VPC_NETWORK_RATE_MBPS = Integer.MAX_VALUE / 128;
 
     @Inject
     EntityManager _entityMgr;
@@ -1768,7 +1772,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             if (isVpcOfferingDynamicRouting(vpc)) {
                 bgpService.allocateASNumber(vpc.getZoneId(), cmd.getAsNumber(), null, vpc.getId());
             }
-            if (cmd.getNetworkRate() != null) {
+            if (cmd.getNetworkRate() != null && cmd.getNetworkRate() != RESET_VPC_NETWORK_RATE) {
                 vpcDetailsDao.addDetail(vpc.getId(), NETWORK_RATE_DETAIL, String.valueOf(cmd.getNetworkRate()), true);
             }
         } catch (CloudRuntimeException ex) {
@@ -2027,11 +2031,11 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         boolean restartRequired = checkAndUpdateRouterSourceNatIp(vpcToUpdate, sourceNatIp);
 
         if (networkRate != null) {
-            // applied even when unchanged, so a retry reaches routers that a failed attempt missed
-            updateVpcNetworkRate(vpcToUpdate, networkRate);
+            storeVpcNetworkRate(vpcToUpdate, networkRate);
         }
 
-        if (vpcDao.update(vpcId, vpc) || restartRequired || networkRate != null) { // Note that the update may fail because nothing has changed, other than the sourcenat ip
+        final boolean vpcUpdated = vpcDao.update(vpcId, vpc);
+        if (vpcUpdated || restartRequired || networkRate != null) { // Note that the update may fail because nothing has changed, other than the sourcenat ip
             logger.debug("Updated VPC {}", vpc);
             if (restartRequired) {
                 if (logger.isDebugEnabled()) {
@@ -2042,7 +2046,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             } else {
                 if (logger.isDebugEnabled()) {
                     logger.debug("no restart needed.");
-                    if (isVpcForProvider(Provider.Netris, vpcToUpdate)) {
+                    if (vpcUpdated && isVpcForProvider(Provider.Netris, vpcToUpdate)) {
                         final String aclProvider = _vpcSrvcDao.getProviderForServiceInVpc(vpc.getId(), Service.NetworkACL);
                         for (final VpcProvider provider : getVpcElements()) {
                             if ((provider instanceof NetworkACLServiceProvider && provider.getName().equalsIgnoreCase(aclProvider))) {
@@ -2052,6 +2056,15 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
                             }
                         }
                     }
+                }
+            }
+            if (networkRate != null) {
+                // applied even when unchanged, so a retry reaches routers that a failed attempt missed
+                final List<String> notApplied = applyVpcNetworkRate(vpcToUpdate);
+                if (!notApplied.isEmpty()) {
+                    throw new CloudRuntimeException(String.format("VPC %s is updated, but its networkrate could not be applied live to %s; " +
+                            "repeat the update with the same networkrate once the routers are running, or it applies at their next start",
+                            vpcToUpdate.getName(), String.join(", ", notApplied)));
                 }
             }
             return vpcDao.findById(vpcId);
@@ -2139,10 +2152,15 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         if (networkRate == null) {
             return;
         }
-        if (networkRate < 0) {
-            throw new InvalidParameterValueException(String.format("%s must be 0 (unlimited) or a number of Mbps above 0", ApiConstants.NETWORKRATE));
+        final boolean rootAdmin = _accountMgr.isRootAdmin(caller.getId());
+        if (networkRate == RESET_VPC_NETWORK_RATE && rootAdmin) {
+            return;
         }
-        if (_accountMgr.isRootAdmin(caller.getId())) {
+        if (networkRate < 0 || networkRate > MAX_VPC_NETWORK_RATE_MBPS) {
+            throw new InvalidParameterValueException(String.format("%s must be 0 (unlimited) or a number of Mbps from 1 to %d%s", ApiConstants.NETWORKRATE,
+                    MAX_VPC_NETWORK_RATE_MBPS, rootAdmin ? ", or -1 for the rate of the VPC's network offering" : ""));
+        }
+        if (rootAdmin) {
             return;
         }
         Integer maxNetworkRate = VpcMaxNetworkRate.valueIn(ownerAccountId);
@@ -2174,11 +2192,31 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
      * Stores the VPC's networkrate and applies it to the public NICs of its running KVM routers. Stopped routers,
      * and routers on other hypervisors, pick it up at their next start.
      */
-    protected void updateVpcNetworkRate(VpcVO vpc, int networkRate) {
-        vpcDetailsDao.addDetail(vpc.getId(), NETWORK_RATE_DETAIL, String.valueOf(networkRate), true);
+    protected void storeVpcNetworkRate(VpcVO vpc, int networkRate) {
+        if (networkRate == RESET_VPC_NETWORK_RATE) {
+            vpcDetailsDao.removeDetail(vpc.getId(), NETWORK_RATE_DETAIL);
+        } else {
+            vpcDetailsDao.addDetail(vpc.getId(), NETWORK_RATE_DETAIL, String.valueOf(networkRate), true);
+        }
+    }
+
+    /**
+     * Sets the rate the public NICs of the VPC's running KVM routers get at their start, so a networkrate change
+     * needs no restart. Other routers get it at their next start.
+     *
+     * @return the routers it could not be applied to, with the reason
+     */
+    protected List<String> applyVpcNetworkRate(VpcVO vpc) {
+        final List<String> notApplied = new ArrayList<>();
         for (DomainRouterVO router : routerDao.listByVpcId(vpc.getId())) {
-            if (router.getState() != VirtualMachine.State.Running || router.getHypervisorType() != HypervisorType.KVM || router.getHostId() == null) {
+            if (router.getHypervisorType() != HypervisorType.KVM || router.getState() == VirtualMachine.State.Stopped
+                    || router.getState() == VirtualMachine.State.Destroyed || router.getState() == VirtualMachine.State.Expunging) {
                 logger.debug("Router {} gets the networkrate of VPC {} at its next start", router, vpc);
+                continue;
+            }
+            if (router.getState() != VirtualMachine.State.Running || router.getHostId() == null) {
+                // a starting router may have its NICs from before the change, a migrating one keeps those of its source
+                notApplied.add(String.format("router %s (%s)", router.getInstanceName(), router.getState()));
                 continue;
             }
             for (NicVO nic : nicDao.listByVmId(router.getId())) {
@@ -2186,15 +2224,18 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
                 if (network == null || network.getTrafficType() != TrafficType.Public) {
                     continue;
                 }
-                UpdateVmNicCommand command = new UpdateVmNicCommand(nic.getMacAddress(), router.getInstanceName(), null, networkRate);
+                final Integer networkRate = _ntwkModel.getNetworkRate(nic.getNetworkId(), router.getId());
+                final int networkRateMbps = networkRate == null || networkRate < 0 ? 0 : networkRate;
+                UpdateVmNicCommand command = new UpdateVmNicCommand(nic.getMacAddress(), router.getInstanceName(), null, networkRateMbps);
                 Answer answer = agentManager.easySend(router.getHostId(), command);
                 if (answer == null || !answer.getResult()) {
-                    throw new CloudRuntimeException(String.format("Failed to set networkrate %d Mbps on the public NIC %s of router %s; " +
-                            "it is stored and applies at the router's next start", networkRate, nic.getMacAddress(), router.getInstanceName()));
+                    notApplied.add(String.format("router %s (%s)", router.getInstanceName(), answer == null ? "no answer from its host" : answer.getDetails()));
+                    break;
                 }
-                logger.info("Set networkrate {} Mbps on the public NIC {} of router {}", networkRate, nic.getMacAddress(), router);
+                logger.info("Set networkrate {} Mbps on the public NIC {} of router {}", networkRateMbps, nic.getMacAddress(), router);
             }
         }
+        return notApplied;
     }
 
     protected Integer validateMtu(VpcVO vpcToUpdate, Integer mtu) {
