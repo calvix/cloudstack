@@ -505,6 +505,19 @@ public class LibvirtDomainXMLParserTest extends TestCase {
     }
 
     @Test
+    public void testInterfaceWithRomBarOffKeepsItWhenWrittenBack() {
+        InterfaceDef nic = parseSingleInterface("    <interface type='bridge'>\n" +
+                "      <mac address='1e:00:00:00:00:01'/>\n" +
+                "      <source bridge='cloudbr1'/>\n" +
+                "      <target dev='vnet0'/>\n" +
+                "      <model type='virtio'/>\n" +
+                "      <rom bar='off' file=''/>\n" +
+                "    </interface>\n");
+
+        assertTrue(nic.toString().contains("<rom bar='off' file=''/>"));
+    }
+
+    @Test
     public void testInterfaceWithoutLinkStateIsParsedAsUp() {
         InterfaceDef nic = parseSingleInterface("    <interface type='bridge'>\n" +
                 "      <mac address='1e:00:00:00:00:01'/>\n" +
