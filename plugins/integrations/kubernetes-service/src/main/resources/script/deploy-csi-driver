@@ -16,15 +16,39 @@
 # specific language governing permissions and limitations
 # under the License.
 
-(/opt/bin/kubectl get pods -A | grep cloudstack-csi-controller) && exit 0
+# Usage: deploy-csi-driver [volume-attach-limit]
+# volume-attach-limit (1-256): how many volumes the node plugin reports as attachable per node. Without it the
+# driver reports its default of 256.
 
-if [ -e /opt/csi/snapshot-crds.yaml ]; then
-    /opt/bin/kubectl apply -f /opt/csi/snapshot-crds.yaml
-    sleep 5
-    /opt/bin/kubectl apply -f /opt/csi/manifest.yaml
+VOLUME_ATTACH_LIMIT="$1"
+
+# Add --volume-attach-limit to the node plugin, unless it already has one.
+set_volume_attach_limit() {
+    if [ -z "$VOLUME_ATTACH_LIMIT" ]; then
+        return 0
+    fi
+    if ! [[ "$VOLUME_ATTACH_LIMIT" =~ ^[0-9]+$ ]] || [ "$VOLUME_ATTACH_LIMIT" -lt 1 ] || [ "$VOLUME_ATTACH_LIMIT" -gt 256 ]; then
+        echo "Ignoring invalid volume attach limit '$VOLUME_ATTACH_LIMIT', allowed range is 1 to 256"
+        return 0
+    fi
+    local args
+    args=$(/opt/bin/kubectl -n kube-system get daemonset cloudstack-csi-node -o jsonpath='{.spec.template.spec.containers[0].args}') || return 1
+    if [[ "$args" == *"--volume-attach-limit="* ]]; then
+        echo "cloudstack-csi-node already has a volume attach limit: $args"
+        return 0
+    fi
+    /opt/bin/kubectl -n kube-system patch daemonset cloudstack-csi-node --type=json \
+        -p "[{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"--volume-attach-limit=${VOLUME_ATTACH_LIMIT}\"}]"
+}
+
+if /opt/bin/kubectl get pods -A | grep -q cloudstack-csi-controller; then
+    # Already deployed, e.g. a retry after the apply below reported an error
+    set_volume_attach_limit || echo "Unable to set the volume attach limit on cloudstack-csi-node"
     exit 0
-else
-    TARGET_DIR="/opt/csi"
+fi
+
+TARGET_DIR="/opt/csi"
+if [ ! -e "$TARGET_DIR/snapshot-crds.yaml" ]; then
     mkdir -p "$TARGET_DIR"
     CSI_URLS=(
       "https://github.com/cloudstack/cloudstack-csi-driver/releases/download/v3.0.0/snapshot-crds.yaml"
@@ -32,15 +56,19 @@ else
     )
     for url in "${CSI_URLS[@]}"; do
         filename=$(basename "$url")
-
-        curl -sSL ${url} -o ${TARGET_DIR}/${filename}
-        if [ $? -ne 0 ]; then
+        if ! curl -sSL "${url}" -o "${TARGET_DIR}/${filename}"; then
           echo "Unable to connect to the internet to download the relevant files to install and setup CloudStack CSI driver"
           exit 1
-        else
-          /opt/bin/kubectl apply -f /opt/csi/snapshot-crds.yaml
-          /opt/bin/kubectl apply -f /opt/csi/manifest.yaml
-          exit 0
         fi
     done
 fi
+
+/opt/bin/kubectl apply -f "$TARGET_DIR/snapshot-crds.yaml"
+sleep 5
+# The apply can fail after creating the node plugin: in the driver's v3.0.0 manifest a "---" separator is glued to
+# the line before it, which merges two objects into one that Kubernetes rejects. Set the limit anyway and return
+# the apply's result as before.
+apply_status=0
+/opt/bin/kubectl apply -f "$TARGET_DIR/manifest.yaml" || apply_status=$?
+set_volume_attach_limit
+exit $apply_status
