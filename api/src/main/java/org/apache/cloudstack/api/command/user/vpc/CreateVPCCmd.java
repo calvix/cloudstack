@@ -135,6 +135,10 @@ public class CreateVPCCmd extends BaseAsyncCreateCmd implements UserCmd {
             type = CommandType.BOOLEAN, since = "4.23.0", authorized = {RoleType.Admin})
     private boolean keepMacAddressOnPublicNic = true;
 
+    @Parameter(name = ApiConstants.NETWORKRATE, type = CommandType.INTEGER,
+            description = ApiConstants.PARAMETER_DESCRIPTION_VPC_NETWORK_RATE, since = "24.0")
+    private Integer networkRate;
+
     // ///////////////////////////////////////////////////
     // ///////////////// Accessors ///////////////////////
     // ///////////////////////////////////////////////////
@@ -217,6 +221,10 @@ public class CreateVPCCmd extends BaseAsyncCreateCmd implements UserCmd {
 
     public boolean getUseVrIpResolver() {
         return BooleanUtils.toBoolean(useVrIpResolver);
+    }
+
+    public Integer getNetworkRate() {
+        return networkRate;
     }
 
     public boolean getKeepMacAddressOnPublicNic() {

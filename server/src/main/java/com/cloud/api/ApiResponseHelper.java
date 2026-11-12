@@ -376,6 +376,7 @@ import com.cloud.network.vpc.PrivateGateway;
 import com.cloud.network.vpc.StaticRoute;
 import com.cloud.network.vpc.Vpc;
 import com.cloud.network.vpc.VpcGateway;
+import com.cloud.network.vpc.VpcManager;
 import com.cloud.network.vpc.VpcOffering;
 import com.cloud.network.vpc.VpcVO;
 import com.cloud.network.vpc.dao.VpcOfferingDao;
@@ -569,6 +570,8 @@ public class ApiResponseHelper implements ResponseGenerator, ResourceIdSupport {
 
     @Inject
     private DomainDao domainDao;
+    @Inject
+    private VpcManager vpcManager;
 
     @Override
     public UserResponse createUserResponse(User user) {
@@ -3687,6 +3690,7 @@ public class ApiResponseHelper implements ResponseGenerator, ResourceIdSupport {
         if (CallContext.current().getCallingAccount().getType() == Account.Type.ADMIN) {
             response.setKeepMacAddressOnPublicNic(vpc.getKeepMacAddressOnPublicNic());
         }
+        response.setNetworkRate(vpcManager.getVpcNetworkRate(vpc.getId()));
         response.setObjectName("vpc");
         return response;
     }

@@ -100,11 +100,13 @@ public interface VpcService {
      * @param displayVpc should this VPC be displayed on public lists
      * @param mtu what maximal transfer unit to us in this VPCs networks
      * @param sourceNatIp the source NAT address to use for this VPC (must already be associated with the VPC)
+     * @param networkRate the rate in Mbps for the public interfaces of the VPC's virtual routers (0 = unlimited), null to keep it
      * @return an object describing the current state of the VPC
      * @throws ResourceUnavailableException if during restart some resources may not be available
      * @throws InsufficientCapacityException if for instance no address space, compute or storage is sufficiently available
      */
-    Vpc updateVpc(long vpcId, String vpcName, String displayText, String customId, Boolean displayVpc, Integer mtu, String sourceNatIp, Boolean keepMacAddressOnPublicNic) throws ResourceUnavailableException, InsufficientCapacityException;
+    Vpc updateVpc(long vpcId, String vpcName, String displayText, String customId, Boolean displayVpc, Integer mtu, String sourceNatIp, Boolean keepMacAddressOnPublicNic,
+            Integer networkRate) throws ResourceUnavailableException, InsufficientCapacityException;
 
     /**
      * Lists VPC(s) based on the parameters passed to the API call

@@ -274,6 +274,16 @@ public class LibvirtDomainXMLParser {
                     def.setSlot(Integer.parseInt(slot, 16));
                 }
 
+                String linkState = getAttrValue("link", "state", nic);
+                if ("down".equalsIgnoreCase(linkState)) {
+                    def.setLinkStateUp(false);
+                }
+
+                // without it a live update of the interface would ask libvirt to change the ROM BAR, which it refuses
+                if ("off".equalsIgnoreCase(getAttrValue("rom", "bar", nic))) {
+                    def.setPxeDisable(true);
+                }
+
                 interfaces.add(def);
             }
 

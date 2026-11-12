@@ -416,6 +416,26 @@ public class LibvirtComputingResourceTest {
         assertNull(nic.getMultiQueueNumber());
     }
 
+    @Test
+    public void readHypervisorVersionsMakesNicXmlCompleteBeforeAnyVmIsDefined() throws LibvirtException {
+        LibvirtVMDef.setGlobalLibvirtVersion(0);
+        LibvirtVMDef.setGlobalQemuVersion(0);
+        final Connect conn = Mockito.mock(Connect.class);
+        Mockito.when(conn.getLibVirVersion()).thenReturn(12_000_000L);
+        Mockito.when(conn.getVersion()).thenReturn(10_002_001L);
+
+        libvirtComputingResourceSpy.readHypervisorVersions(conn);
+
+        final InterfaceDef nic = new InterfaceDef();
+        nic.defBridgeNet("br0", null, "02:00:00:00:00:01", InterfaceDef.NicModel.VIRTIO, 125000);
+        nic.setPackedVirtQueues(true);
+        final String xml = nic.toString();
+        assertTrue(xml.contains("<inbound average='125000' peak='125000'/>"));
+        assertTrue(xml.contains("packed='on'"));
+        assertEquals(12_000_000L, libvirtComputingResourceSpy.getHypervisorLibvirtVersion());
+        assertEquals(10_002_001L, libvirtComputingResourceSpy.getHypervisorQemuVersion());
+    }
+
     /**
      This test tests if the Agent can handle a vmSpec coming
      from a <=4.1 management server.
@@ -7798,5 +7818,16 @@ public class LibvirtComputingResourceTest {
         Pair<Integer, Long> expectedResult = new Pair<>(expectedPeriod, expectedQuota);
         Pair<Integer, Long> result = libvirtComputingResourceSpy.getPeriodAndQuota(cpuQuotaPercentage);
         Assert.assertEquals(expectedResult, result);
+    }
+
+    @Test
+    public void getInterfaceSkipsNicsWithoutAMacAddress() {
+        Connect conn = Mockito.mock(Connect.class);
+        InterfaceDef withoutMac = new InterfaceDef();
+        InterfaceDef nic = new InterfaceDef();
+        nic.defBridgeNet("cloudbr1", "vnet0", "1e:00:00:00:00:01", InterfaceDef.NicModel.VIRTIO);
+        Mockito.doReturn(List.of(withoutMac, nic)).when(libvirtComputingResourceSpy).getInterfaces(conn, "r-50-VM");
+
+        Assert.assertSame(nic, libvirtComputingResourceSpy.getInterface(conn, "r-50-VM", "1e:00:00:00:00:01"));
     }
 }

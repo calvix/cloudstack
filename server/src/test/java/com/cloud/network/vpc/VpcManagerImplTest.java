@@ -68,6 +68,17 @@ import com.cloud.utils.db.EntityManager;
 import com.cloud.utils.net.Ip;
 import com.cloud.utils.net.NetUtils;
 import com.cloud.vm.DomainRouterVO;
+import com.cloud.agent.AgentManager;
+import com.cloud.agent.api.UpdateVmNicCommand;
+import com.cloud.exception.PermissionDeniedException;
+import com.cloud.hypervisor.Hypervisor.HypervisorType;
+import com.cloud.network.Networks.TrafficType;
+import com.cloud.network.dao.NetworkVO;
+import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.vm.NicVO;
+import com.cloud.vm.VirtualMachine;
+import org.apache.cloudstack.resourcedetail.VpcDetailVO;
+import org.apache.cloudstack.resourcedetail.dao.VpcDetailsDao;
 import com.cloud.vm.dao.DomainRouterDao;
 import com.cloud.vm.dao.NicDao;
 import org.apache.cloudstack.acl.SecurityChecker;
@@ -87,6 +98,8 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockedConstruction;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -175,6 +188,10 @@ public class VpcManagerImplTest {
     RoutedIpv4Manager routedIpv4Manager;
     @Mock
     IpAddressManager ipAddressManager;
+    @Mock
+    VpcDetailsDao vpcDetailsDao;
+    @Mock
+    AgentManager agentManager;
 
     public static final long ACCOUNT_ID = 1;
     private AccountVO account;
@@ -236,6 +253,8 @@ public class VpcManagerImplTest {
         manager._networkAclDao = networkACLDaoMock;
         manager.routedIpv4Manager = routedIpv4Manager;
         manager._ipAddrMgr = ipAddressManager;
+        manager.vpcDetailsDao = vpcDetailsDao;
+        manager.agentManager = agentManager;
         CallContext.register(Mockito.mock(User.class), Mockito.mock(Account.class));
         registerCallContext();
         overrideDefaultConfigValue(NetworkService.AllowUsersToSpecifyVRMtu, "_defaultValue", "false");
@@ -454,6 +473,7 @@ public class VpcManagerImplTest {
         Mockito.when(cmd.isDisplayVpc()).thenReturn(true);
         Mockito.when(cmd.getPublicMtu()).thenReturn(publicMtu);
         Mockito.when(cmd.getSourceNatIP()).thenReturn(sourceNatIp);
+        Mockito.when(cmd.getNetworkRate()).thenReturn(null);
 
         manager.updateVpc(cmd);
         Assert.assertEquals(publicMtu, vpcVO.getPublicMtu());
@@ -745,5 +765,239 @@ public class VpcManagerImplTest {
 
         Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
         Mockito.verify(ipAddressDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+    }
+
+    private Account accountCalling(boolean rootAdmin) {
+        Account caller = Mockito.mock(Account.class);
+        Mockito.when(caller.getId()).thenReturn(7L);
+        Mockito.when(accountManager.isRootAdmin(7L)).thenReturn(rootAdmin);
+        return caller;
+    }
+
+    private void runWithMaxNetworkRate(String maxNetworkRate, Runnable test) throws NoSuchFieldException, IllegalAccessException {
+        overrideDefaultConfigValue(VpcManager.VpcMaxNetworkRate, "_defaultValue", maxNetworkRate);
+        try {
+            test.run();
+        } finally {
+            overrideDefaultConfigValue(VpcManager.VpcMaxNetworkRate, "_defaultValue", "0");
+        }
+    }
+
+    @Test
+    public void validateVpcNetworkRateAcceptsNoRate() {
+        manager.validateVpcNetworkRate(Mockito.mock(Account.class), ACCOUNT_ID, null);
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void validateVpcNetworkRateRefusesANegativeRate() {
+        manager.validateVpcNetworkRate(accountCalling(true), ACCOUNT_ID, -2);
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void validateVpcNetworkRateRefusesARateTheHypervisorsCannotTake() {
+        manager.validateVpcNetworkRate(accountCalling(true), ACCOUNT_ID, VpcManagerImpl.MAX_VPC_NETWORK_RATE_MBPS + 1);
+    }
+
+    @Test
+    public void validateVpcNetworkRateLetsRootAdminsResetTheRate() {
+        manager.validateVpcNetworkRate(accountCalling(true), ACCOUNT_ID, VpcManagerImpl.RESET_VPC_NETWORK_RATE);
+    }
+
+    @Test
+    public void validateVpcNetworkRateRefusesUsersResettingTheRate() throws Exception {
+        runWithMaxNetworkRate("10000", () -> Assert.assertThrows(InvalidParameterValueException.class,
+                () -> manager.validateVpcNetworkRate(accountCalling(false), ACCOUNT_ID, VpcManagerImpl.RESET_VPC_NETWORK_RATE)));
+    }
+
+    @Test
+    public void vpcMaxNetworkRateCanOnlyBeChangedByRootAdmins() {
+        // updateConfiguration lets domain admins change account settings of their domain, except system ones
+        Assert.assertEquals(ConfigKey.CATEGORY_SYSTEM, VpcManager.VpcMaxNetworkRate.category());
+    }
+
+    @Test
+    public void validateVpcNetworkRateLetsRootAdminsSetAnyRate() {
+        Account caller = accountCalling(true);
+        manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 0);
+        manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 100000);
+    }
+
+    @Test(expected = PermissionDeniedException.class)
+    public void validateVpcNetworkRateRefusesUsersWithoutACeiling() {
+        manager.validateVpcNetworkRate(accountCalling(false), ACCOUNT_ID, 1000);
+    }
+
+    @Test
+    public void validateVpcNetworkRateRefusesUsersAboveTheCeilingOrUnlimited() throws Exception {
+        runWithMaxNetworkRate("10000", () -> {
+            Account caller = accountCalling(false);
+            Assert.assertThrows(InvalidParameterValueException.class, () -> manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 10001));
+            Assert.assertThrows(InvalidParameterValueException.class, () -> manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 0));
+        });
+    }
+
+    @Test
+    public void validateVpcNetworkRateLetsUsersSetUpToTheCeiling() throws Exception {
+        runWithMaxNetworkRate("10000", () -> {
+            Account caller = accountCalling(false);
+            manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 1);
+            manager.validateVpcNetworkRate(caller, ACCOUNT_ID, 10000);
+        });
+    }
+
+    @Test
+    public void getVpcNetworkRateReadsTheVpcDetail() {
+        Mockito.when(vpcDetailsDao.findDetail(1L, VpcManager.NETWORK_RATE_DETAIL)).thenReturn(new VpcDetailVO(1L, VpcManager.NETWORK_RATE_DETAIL, "5000", true));
+        Assert.assertEquals(Integer.valueOf(5000), manager.getVpcNetworkRate(1L));
+    }
+
+    @Test
+    public void getVpcNetworkRateIsNullWithoutOrWithAnInvalidDetail() {
+        Assert.assertNull(manager.getVpcNetworkRate(1L));
+        Mockito.when(vpcDetailsDao.findDetail(2L, VpcManager.NETWORK_RATE_DETAIL)).thenReturn(new VpcDetailVO(2L, VpcManager.NETWORK_RATE_DETAIL, "fast", true));
+        Assert.assertNull(manager.getVpcNetworkRate(2L));
+    }
+
+    private DomainRouterVO vpcRouter(VirtualMachine.State state) {
+        DomainRouterVO router = Mockito.mock(DomainRouterVO.class);
+        Mockito.when(router.getId()).thenReturn(50L);
+        Mockito.when(router.getState()).thenReturn(state);
+        Mockito.when(router.getHypervisorType()).thenReturn(HypervisorType.KVM);
+        Mockito.when(router.getHostId()).thenReturn(60L);
+        Mockito.when(router.getInstanceName()).thenReturn("r-50-VM");
+        Mockito.when(routerDao.listByVpcId(1L)).thenReturn(List.of(router));
+        return router;
+    }
+
+    private NicVO routerNic(long networkId, TrafficType trafficType, String mac) {
+        NicVO nic = Mockito.mock(NicVO.class);
+        Mockito.when(nic.getNetworkId()).thenReturn(networkId);
+        Mockito.when(nic.getMacAddress()).thenReturn(mac);
+        NetworkVO network = Mockito.mock(NetworkVO.class);
+        Mockito.when(network.getTrafficType()).thenReturn(trafficType);
+        Mockito.when(networkDao.findById(networkId)).thenReturn(network);
+        return nic;
+    }
+
+    private VpcVO vpcWithId1() {
+        VpcVO vpc = Mockito.mock(VpcVO.class);
+        Mockito.when(vpc.getId()).thenReturn(1L);
+        return vpc;
+    }
+
+    @Test
+    public void storeVpcNetworkRateStoresTheRateAsAVpcDetail() {
+        manager.storeVpcNetworkRate(vpcWithId1(), 2000);
+
+        Mockito.verify(vpcDetailsDao).addDetail(1L, VpcManager.NETWORK_RATE_DETAIL, "2000", true);
+    }
+
+    @Test
+    public void storeVpcNetworkRateResetRemovesTheVpcDetail() {
+        manager.storeVpcNetworkRate(vpcWithId1(), VpcManagerImpl.RESET_VPC_NETWORK_RATE);
+
+        Mockito.verify(vpcDetailsDao).removeDetail(1L, VpcManager.NETWORK_RATE_DETAIL);
+        Mockito.verify(vpcDetailsDao, Mockito.never()).addDetail(Mockito.anyLong(), Mockito.anyString(), Mockito.anyString(), Mockito.anyBoolean());
+    }
+
+    @Test
+    public void applyVpcNetworkRateSetsTheRateOfThePublicNicsOnTheRunningRouters() {
+        vpcRouter(VirtualMachine.State.Running);
+        NicVO publicNic = routerNic(70L, TrafficType.Public, "1e:00:00:00:00:01");
+        NicVO guestNic = routerNic(71L, TrafficType.Guest, "02:00:00:00:00:02");
+        Mockito.when(nicDao.listByVmId(50L)).thenReturn(List.of(publicNic, guestNic));
+        Mockito.when(networkModel.getNetworkRate(70L, 50L)).thenReturn(2000);
+        Mockito.when(agentManager.easySend(Mockito.eq(60L), Mockito.any(UpdateVmNicCommand.class))).thenReturn(new Answer(null, true, null));
+
+        Assert.assertTrue(manager.applyVpcNetworkRate(vpcWithId1()).isEmpty());
+
+        ArgumentCaptor<UpdateVmNicCommand> command = ArgumentCaptor.forClass(UpdateVmNicCommand.class);
+        Mockito.verify(agentManager).easySend(Mockito.eq(60L), command.capture());
+        Assert.assertEquals("1e:00:00:00:00:01", command.getValue().getNicMacAddress());
+        Assert.assertEquals("r-50-VM", command.getValue().getVmName());
+        Assert.assertEquals(Integer.valueOf(2000), command.getValue().getNetworkRateMbps());
+        Assert.assertNull(command.getValue().isEnabled());
+    }
+
+    @Test
+    public void applyVpcNetworkRateRemovesTheLimitForAnUnlimitedRate() {
+        vpcRouter(VirtualMachine.State.Running);
+        NicVO publicNic = routerNic(70L, TrafficType.Public, "1e:00:00:00:00:01");
+        Mockito.when(nicDao.listByVmId(50L)).thenReturn(List.of(publicNic));
+        Mockito.when(networkModel.getNetworkRate(70L, 50L)).thenReturn(-1);
+        Mockito.when(agentManager.easySend(Mockito.eq(60L), Mockito.any(UpdateVmNicCommand.class))).thenReturn(new Answer(null, true, null));
+
+        manager.applyVpcNetworkRate(vpcWithId1());
+
+        ArgumentCaptor<UpdateVmNicCommand> command = ArgumentCaptor.forClass(UpdateVmNicCommand.class);
+        Mockito.verify(agentManager).easySend(Mockito.eq(60L), command.capture());
+        Assert.assertEquals(Integer.valueOf(0), command.getValue().getNetworkRateMbps());
+    }
+
+    @Test
+    public void applyVpcNetworkRateLeavesStoppedRoutersForTheirNextStart() {
+        vpcRouter(VirtualMachine.State.Stopped);
+
+        Assert.assertTrue(manager.applyVpcNetworkRate(vpcWithId1()).isEmpty());
+
+        Mockito.verify(agentManager, Mockito.never()).easySend(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
+    public void applyVpcNetworkRateReportsARouterThatIsStarting() {
+        vpcRouter(VirtualMachine.State.Starting);
+
+        Assert.assertEquals(1, manager.applyVpcNetworkRate(vpcWithId1()).size());
+
+        Mockito.verify(agentManager, Mockito.never()).easySend(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
+    public void applyVpcNetworkRateReportsAHostThatCannotApplyIt() {
+        vpcRouter(VirtualMachine.State.Running);
+        NicVO publicNic = routerNic(70L, TrafficType.Public, "1e:00:00:00:00:01");
+        Mockito.when(nicDao.listByVmId(50L)).thenReturn(List.of(publicNic));
+        Mockito.when(networkModel.getNetworkRate(70L, 50L)).thenReturn(2000);
+        Mockito.when(agentManager.easySend(Mockito.eq(60L), Mockito.any(UpdateVmNicCommand.class))).thenReturn(new Answer(null, false, "no domain"));
+
+        Assert.assertEquals(1, manager.applyVpcNetworkRate(vpcWithId1()).size());
+    }
+
+    private VpcManagerImpl spyUpdatingVpc1(VpcVO vpcVO, List<String> applyProblems) {
+        Mockito.when(vpcVO.getAccountId()).thenReturn(ACCOUNT_ID);
+        Mockito.when(vpcDao.findById(1L)).thenReturn(vpcVO);
+        Mockito.when(vpcDao.createForUpdate(1L)).thenReturn(vpcVO);
+        Mockito.when(accountManager.isRootAdmin(Mockito.anyLong())).thenReturn(true);
+        VpcManagerImpl spy = Mockito.spy(manager);
+        Mockito.doNothing().when(spy).storeVpcNetworkRate(Mockito.any(), Mockito.anyInt());
+        Mockito.doReturn(applyProblems).when(spy).applyVpcNetworkRate(Mockito.any());
+        return spy;
+    }
+
+    @Test
+    public void updateVpcAppliesAnUnchangedNetworkRateAgain() throws Exception {
+        VpcVO vpcVO = Mockito.mock(VpcVO.class);
+        VpcManagerImpl spy = spyUpdatingVpc1(vpcVO, List.of());
+
+        spy.updateVpc(1L, null, null, null, null, null, null, null, 2000);
+
+        Mockito.verify(spy).storeVpcNetworkRate(vpcVO, 2000);
+        Mockito.verify(spy).applyVpcNetworkRate(vpcVO);
+    }
+
+    @Test
+    public void updateVpcSavesTheOtherChangesBeforeTheRateFailsToApply() throws Exception {
+        VpcVO vpcVO = Mockito.mock(VpcVO.class);
+        VpcManagerImpl spy = spyUpdatingVpc1(vpcVO, List.of("router r-50-VM: no domain"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> spy.updateVpc(1L, "new-name", null, null, null, null, null, null, 2000));
+
+        Assert.assertTrue(e.getMessage().contains("r-50-VM"));
+        Mockito.verify(vpcVO).setName("new-name");
+        InOrder inOrder = Mockito.inOrder(spy, vpcDao);
+        inOrder.verify(spy).storeVpcNetworkRate(vpcVO, 2000);
+        inOrder.verify(vpcDao).update(1L, vpcVO);
+        inOrder.verify(spy).applyVpcNetworkRate(vpcVO);
     }
 }

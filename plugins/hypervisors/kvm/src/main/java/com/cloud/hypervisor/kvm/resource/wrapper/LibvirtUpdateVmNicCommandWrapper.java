@@ -22,8 +22,10 @@ package com.cloud.hypervisor.kvm.resource.wrapper;
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.UpdateVmNicAnswer;
 import com.cloud.agent.api.UpdateVmNicCommand;
+import com.cloud.hypervisor.kvm.resource.BridgeVifDriver;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef.InterfaceDef;
+import com.cloud.network.Networks.TrafficType;
 import com.cloud.resource.CommandWrapper;
 import com.cloud.resource.ResourceWrapper;
 import org.libvirt.Connect;
@@ -33,11 +35,15 @@ import org.libvirt.LibvirtException;
 @ResourceWrapper(handles =  UpdateVmNicCommand.class)
 public final class LibvirtUpdateVmNicCommandWrapper extends CommandWrapper<UpdateVmNicCommand, Answer, LibvirtComputingResource> {
 
+    // libvirt takes interface bandwidth in kilobytes per second
+    private static final int KBYTES_PER_SECOND_PER_MBPS = 125;
+
     @Override
     public Answer execute(UpdateVmNicCommand command, LibvirtComputingResource libvirtComputingResource) {
         String nicMacAddress = command.getNicMacAddress();
         String vmName = command.getVmName();
-        boolean isEnabled = command.isEnabled();
+        Boolean isEnabled = command.isEnabled();
+        Integer networkRateMbps = command.getNetworkRateMbps();
 
         Domain vm = null;
         try {
@@ -46,7 +52,18 @@ public final class LibvirtUpdateVmNicCommandWrapper extends CommandWrapper<Updat
             vm = libvirtComputingResource.getDomain(conn, vmName);
 
             final InterfaceDef nic = libvirtComputingResource.getInterface(conn, vmName, nicMacAddress);
-            nic.setLinkStateUp(isEnabled);
+            if (isEnabled != null) {
+                nic.setLinkStateUp(isEnabled);
+            }
+            if (networkRateMbps != null) {
+                // the NIC is written back as parsed, which keeps only what the bridge VIF driver writes; others add
+                // more, like an Open vSwitch port and its VLAN tag
+                if (!(libvirtComputingResource.getVifDriver(TrafficType.Public, nic.getBrName()) instanceof BridgeVifDriver)) {
+                    return new UpdateVmNicAnswer(command, false, String.format("The network rate of NIC %s can only be changed live with the bridge VIF " +
+                            "driver; it applies at the next start of %s", nicMacAddress, vmName));
+                }
+                nic.setNetworkRateKBps(networkRateMbps > 0 ? networkRateMbps * KBYTES_PER_SECOND_PER_MBPS : 0);
+            }
             vm.updateDeviceFlags(nic.toString(), Domain.DeviceModifyFlags.LIVE);
 
             return new UpdateVmNicAnswer(command, true, "success");
