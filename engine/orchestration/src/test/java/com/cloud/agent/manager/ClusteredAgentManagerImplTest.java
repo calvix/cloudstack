@@ -24,6 +24,7 @@ import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
 import com.cloud.resource.ResourceManagerImpl;
 import org.junit.Assert;
+import com.cloud.utils.nio.NioServer;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -179,5 +180,19 @@ public class ClusteredAgentManagerImplTest {
             Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(client));
             Assert.assertTrue(clusteredAgentManagerImpl.isPeerChannelClosed(null));
         }
+    }
+
+    @Test
+    public void cancelPreparingForMaintenanceAcceptsNewAgentConnectionsAgain() {
+        ClusteredAgentManagerImpl clusteredAgentManagerImpl = Mockito.spy(ClusteredAgentManagerImpl.class);
+        NioServer connection = mock(NioServer.class);
+        clusteredAgentManagerImpl._connection = connection;
+
+        clusteredAgentManagerImpl.onManagementServerCancelPreparingForMaintenance();
+
+        // a cancelled drain that kept the block would leave this management server refusing every agent that
+        // reconnects to it until it is restarted
+        verify(connection).unblock();
+        verify(connection, never()).block();
     }
 }

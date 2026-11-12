@@ -1557,7 +1557,7 @@ public class ClusteredAgentManagerImpl extends AgentManagerImpl implements Clust
     @Override
     public void onManagementServerCancelPreparingForMaintenance() {
         logger.debug("Management server cancel preparing for maintenance");
-        super.onManagementServerPreparingForMaintenance();
+        super.onManagementServerCancelPreparingForMaintenance();
 
         // needed for the case when Management Server in Preparing For Maintenance but didn't go to Maintenance state
         // (where this variable will be reset)
