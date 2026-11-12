@@ -18,6 +18,9 @@ package com.cloud.agent.manager;
 
 import com.cloud.agent.Listener;
 import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.Command;
+import com.cloud.agent.api.MaintainCommand;
+import com.cloud.agent.api.MigrateAgentConnectionCommand;
 import com.cloud.agent.api.ReadyCommand;
 import com.cloud.agent.api.StartupCommand;
 import com.cloud.agent.api.StartupRoutingCommand;
@@ -136,5 +139,73 @@ public class AgentManagerImplTest {
         Mockito.when(host.getDetail(Host.HOST_SSH_PORT)).thenReturn(String.valueOf(3922));
         int hostSshPort = mgr.getHostSshPort(host);
         Assert.assertEquals(3922, hostSshPort);
+    }
+
+    private HostVO hostWithStatus(Status status) {
+        HostVO h = Mockito.mock(HostVO.class);
+        Mockito.when(h.getStatus()).thenReturn(status);
+        return h;
+    }
+
+    @Test
+    public void waitWhileAgentHandoffDoesNotWaitForAnUpHost() {
+        HostVO up = hostWithStatus(Status.Up);
+        Mockito.when(hostDao.findById(1L)).thenReturn(up);
+        long start = System.nanoTime();
+        mgr.waitWhileAgentHandoff(1L, new Command[]{new MaintainCommand()});
+        Assert.assertTrue(System.nanoTime() - start < 1_000_000_000L);
+        Mockito.verify(hostDao, Mockito.times(1)).findById(1L);
+    }
+
+    @Test
+    public void waitWhileAgentHandoffNeverHoldsTheMoveCommand() {
+        HostVO rebalancing = hostWithStatus(Status.Rebalancing);
+        Mockito.when(hostDao.findById(1L)).thenReturn(rebalancing);
+        mgr.waitWhileAgentHandoff(1L, new Command[]{new MigrateAgentConnectionCommand()});
+        Mockito.verify(hostDao, Mockito.never()).findById(1L);
+    }
+
+    @Test
+    public void waitWhileAgentHandoffHoldsThroughRebalancingAndConnectingUntilUp() {
+        HostVO rebalancing = hostWithStatus(Status.Rebalancing);
+        HostVO connecting = hostWithStatus(Status.Connecting);
+        HostVO up = hostWithStatus(Status.Up);
+        Mockito.when(hostDao.findById(1L)).thenReturn(rebalancing, rebalancing, connecting, up);
+        long start = System.nanoTime();
+        mgr.waitWhileAgentHandoff(1L, new Command[]{new MaintainCommand()});
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        Mockito.verify(hostDao, Mockito.times(4)).findById(1L);
+        Assert.assertTrue("released only once the host is Up, elapsed " + elapsedMs + " ms", elapsedMs >= 1000 && elapsedMs < 10_000);
+    }
+
+    @Test
+    public void easySendPassesARebalancingHostToSend() throws Exception {
+        Answer answer = Mockito.mock(Answer.class);
+        HostVO rebalancing = hostWithStatus(Status.Rebalancing);
+        Mockito.when(hostDao.findById(1L)).thenReturn(rebalancing);
+        Mockito.doReturn(answer).when(mgr).send(Mockito.eq(1L), Mockito.any(Command.class));
+        Assert.assertSame(answer, mgr.easySend(1L, new MaintainCommand()));
+    }
+
+    @Test
+    public void easySendStillRefusesADisconnectedHost() throws Exception {
+        HostVO disconnected = hostWithStatus(Status.Disconnected);
+        Mockito.when(hostDao.findById(1L)).thenReturn(disconnected);
+        Assert.assertNull(mgr.easySend(1L, new MaintainCommand()));
+        Mockito.verify(mgr, Mockito.never()).send(Mockito.anyLong(), Mockito.any(Command.class));
+    }
+
+    @Test
+    public void isAgentIdleOnlyWhileNoCommandWaitsForItsAnswer() {
+        Mockito.doReturn(attache).when(mgr).findAttache(1L);
+        Assert.assertTrue(mgr.isAgentIdle(1L));
+        Listener waiting = Mockito.mock(Listener.class);
+        Mockito.when(waiting.isRecurring()).thenReturn(false);
+        attache.registerListener(42L, waiting);
+        Assert.assertFalse(mgr.isAgentIdle(1L));
+        attache.unregisterListener(42L);
+        Assert.assertTrue(mgr.isAgentIdle(1L));
+        Mockito.doReturn(null).when(mgr).findAttache(2L);
+        Assert.assertTrue(mgr.isAgentIdle(2L));
     }
 }
