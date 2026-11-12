@@ -608,12 +608,25 @@ public class IpAddressManagerImpl extends ManagerBase implements IpAddressManage
                 Long activeCount = null;
                 Long addCount = null;
 
-                totalCount = _firewallDao.countRulesByIpId(ip.getId());
-                if (postApplyRules) {
-                    revokeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Revoke);
+                if (ip.getVpcId() != null) {
+                    // VPC firewall rules have no network and do not need the IP on the router, see isIpAllocatedToVpc
+                    final List<FirewallRuleVO> rules = _firewallDao.listByIp(ip.getId()).stream()
+                            .filter(rule -> rule.getNetworkId() != null).collect(Collectors.toList());
+                    totalCount = (long) rules.size();
+                    if (postApplyRules) {
+                        revokeCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Revoke).count();
+                    } else {
+                        activeCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Active).count();
+                        addCount = rules.stream().filter(rule -> rule.getState() == FirewallRule.State.Add).count();
+                    }
                 } else {
-                    activeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Active);
-                    addCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Add);
+                    totalCount = _firewallDao.countRulesByIpId(ip.getId());
+                    if (postApplyRules) {
+                        revokeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Revoke);
+                    } else {
+                        activeCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Active);
+                        addCount = _firewallDao.countRulesByIpIdAndState(ip.getId(), FirewallRule.State.Add);
+                    }
                 }
 
                 if (totalCount == null || totalCount.longValue() == 0L) {
@@ -822,16 +835,24 @@ public class IpAddressManagerImpl extends ManagerBase implements IpAddressManage
                 logger.debug("Releasing ip {}; sourceNat = {}", ip, ip.isSourceNat());
             }
 
-            if (ip.getAssociatedWithNetworkId() != null) {
-                Network network = _networksDao.findById(ip.getAssociatedWithNetworkId());
+            Network associatedNetwork = ip.getAssociatedWithNetworkId() == null ? null : _networksDao.findById(ip.getAssociatedWithNetworkId());
+            if (ip.getAssociatedWithNetworkId() != null && associatedNetwork == null) {
+                // The network is gone, and with it the IP's place on a router; release the IP as an unassociated one
+                logger.warn("IP {} is still associated with the removed network with ID {}; releasing it without applying IP associations",
+                        ip, ip.getAssociatedWithNetworkId());
+            }
+            if (associatedNetwork != null) {
                 try {
-                    if (!applyIpAssociations(network, rulesContinueOnErrFlag)) {
-                        logger.warn("Unable to apply ip address associations for " + network);
+                    if (!applyIpAssociations(associatedNetwork, rulesContinueOnErrFlag)) {
+                        logger.warn("Unable to apply ip address associations for " + associatedNetwork);
                         success = false;
                     }
                 } catch (ResourceUnavailableException e) {
                     throw new CloudRuntimeException("We should never get to here because we used true when applyIpAssociations", e);
                 }
+            } else if (ip.getAssociatedWithNetworkId() != null && !success) {
+                // keep it out of the pool while rules of the removed network are still on it
+                logger.warn("Not releasing IP {}, as its rules could not be cleaned up", ip);
             } else if (ip.getState() == State.Releasing) {
                 publicIpQuarantine = addPublicIpAddressToQuarantine(ipToBeDisassociated, caller.getDomainId());
                 _ipAddressDao.unassignIpAddress(ip.getId());

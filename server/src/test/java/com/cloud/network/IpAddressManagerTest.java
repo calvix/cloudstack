@@ -37,9 +37,13 @@ import java.util.Vector;
 
 import com.cloud.network.dao.PublicIpQuarantineDao;
 import com.cloud.network.vo.PublicIpQuarantineVO;
+import com.cloud.network.dao.FirewallRulesDao;
+import com.cloud.network.rules.FirewallRuleVO;
+import com.cloud.network.addr.PublicIp;
 import com.cloud.user.Account;
 import com.cloud.user.AccountManager;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -121,6 +125,12 @@ public class IpAddressManagerTest {
 
     @Mock
     VlanDao vlanDao;
+
+    @Mock
+    AnnotationDao annotationDao;
+
+    @Mock
+    FirewallRulesDao firewallRulesDao;
 
     final long dummyID = 1L;
 
@@ -639,5 +649,78 @@ public class IpAddressManagerTest {
                 Collections.singletonList(rule), FirewallRule.Purpose.Firewall, applier, true);
 
         assertFalse(result);
+    }
+
+    @Test
+    public void disassociatePublicIpAddressReleasesAnIpStillBoundToARemovedNetwork() throws ResourceUnavailableException {
+        IPAddressVO ip = mock(IPAddressVO.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getAssociatedWithNetworkId()).thenReturn(20L);
+        when(ip.getVpcId()).thenReturn(30L);
+        when(ip.getState()).thenReturn(IpAddress.State.Releasing);
+        when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
+        Mockito.doReturn(true).when(ipAddressManager).cleanupIpResources(ip, 1L, account);
+        Mockito.doReturn(ip).when(ipAddressManager).markIpAsUnavailable(10L);
+        Mockito.doReturn(null).when(ipAddressManager).addPublicIpAddressToQuarantine(Mockito.any(), Mockito.any());
+        // findById skips removed networks
+        when(networkDao.findById(20L)).thenReturn(null);
+
+        assertTrue(ipAddressManager.disassociatePublicIpAddress(ip, 1L, account));
+
+        Mockito.verify(ipAddressManager, Mockito.never()).applyIpAssociations(Mockito.any(), Mockito.anyBoolean());
+        Mockito.verify(ipAddressDao).unassignIpAddress(10L);
+    }
+
+    @Test
+    public void disassociatePublicIpAddressKeepsAnIpOfARemovedNetworkWhoseRulesWereNotCleanedUp() throws ResourceUnavailableException {
+        IPAddressVO ip = mock(IPAddressVO.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getAssociatedWithNetworkId()).thenReturn(20L);
+        when(ip.getVpcId()).thenReturn(30L);
+        when(ipAddressDao.acquireInLockTable(10L)).thenReturn(ip);
+        Mockito.doReturn(false).when(ipAddressManager).cleanupIpResources(ip, 1L, account);
+        Mockito.doReturn(ip).when(ipAddressManager).markIpAsUnavailable(10L);
+        when(networkDao.findById(20L)).thenReturn(null);
+
+        assertFalse(ipAddressManager.disassociatePublicIpAddress(ip, 1L, account));
+
+        Mockito.verify(ipAddressDao, Mockito.never()).unassignIpAddress(10L);
+    }
+
+    private FirewallRuleVO ruleOfNetwork(Long networkId, FirewallRule.State state) {
+        FirewallRuleVO rule = mock(FirewallRuleVO.class);
+        when(rule.getNetworkId()).thenReturn(networkId);
+        when(rule.getState()).thenReturn(state);
+        return rule;
+    }
+
+    private PublicIp vpcIp() {
+        PublicIp ip = mock(PublicIp.class);
+        when(ip.getId()).thenReturn(10L);
+        when(ip.getVpcId()).thenReturn(30L);
+        return ip;
+    }
+
+    @Test
+    public void ipAssociationIsNeededOnceTheLastRuleOfANetworkOnAVpcIpIsRevoked() {
+        Network network = mock(Network.class);
+        when(network.getState()).thenReturn(Network.State.Implemented);
+        FirewallRuleVO revokedPortForward = ruleOfNetwork(5L, FirewallRule.State.Revoke);
+        FirewallRuleVO vpcFirewallRule = ruleOfNetwork(null, FirewallRule.State.Active);
+        when(firewallRulesDao.listByIp(10L)).thenReturn(List.of(revokedPortForward, vpcFirewallRule));
+
+        // the VPC firewall rule that stays does not keep the IP on the router
+        assertTrue(ipAddressManager.checkIfIpAssocRequired(network, true, List.of(vpcIp())));
+    }
+
+    @Test
+    public void ipAssociationIsNotNeededWhileARuleOfANetworkOnAVpcIpStays() {
+        Network network = mock(Network.class);
+        when(network.getState()).thenReturn(Network.State.Implemented);
+        FirewallRuleVO revokedPortForward = ruleOfNetwork(5L, FirewallRule.State.Revoke);
+        FirewallRuleVO activeLoadBalancer = ruleOfNetwork(6L, FirewallRule.State.Active);
+        when(firewallRulesDao.listByIp(10L)).thenReturn(List.of(revokedPortForward, activeLoadBalancer));
+
+        assertFalse(ipAddressManager.checkIfIpAssocRequired(network, true, List.of(vpcIp())));
     }
 }
