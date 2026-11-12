@@ -23,6 +23,7 @@ import com.cloud.host.HostVO;
 import com.cloud.host.Status;
 import com.cloud.host.dao.HostDao;
 import com.cloud.resource.ResourceManagerImpl;
+import com.cloud.utils.nio.NioServer;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -146,5 +147,19 @@ public class ClusteredAgentManagerImplTest {
         clusteredAgentManagerImpl.scanDirectAgentToLoad();
         verify(clusteredAgentManagerImpl).investigate(agentAttache);
         verify(clusteredAgentManagerImpl).loadDirectlyConnectedHost(hostVO, false);
+    }
+
+    @Test
+    public void cancelPreparingForMaintenanceAcceptsNewAgentConnectionsAgain() {
+        ClusteredAgentManagerImpl clusteredAgentManagerImpl = Mockito.spy(ClusteredAgentManagerImpl.class);
+        NioServer connection = mock(NioServer.class);
+        clusteredAgentManagerImpl._connection = connection;
+
+        clusteredAgentManagerImpl.onManagementServerCancelPreparingForMaintenance();
+
+        // a cancelled drain that kept the block would leave this management server refusing every agent that
+        // reconnects to it until it is restarted
+        verify(connection).unblock();
+        verify(connection, never()).block();
     }
 }
