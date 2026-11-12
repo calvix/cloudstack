@@ -1,3 +1,12 @@
+cloudstack (4.23.0.0-mdc3.1.0) unstable; urgency=low
+
+  * MDC release cs-4.23.0.0+mdc-3.1.0 on Apache CloudStack 4.23.0.0. Adds to 3.0.0:
+    - kvm: encrypt KVM live-migration data stream with QEMU-native TLS
+    - kvm: allow online snapshots of encrypted RBD volumes
+    - agent: accept new agent connections again when a drain is cancelled
+
+ -- calvix <7136358+calvix@users.noreply.github.com>  Thu, 12 Nov 2026 13:34:58 +0100
+
 cloudstack (4.23.0.0-mdc3.0.0) unstable; urgency=low
 
   * MDC release cs-4.23.0.0+mdc-3.0.0 on Apache CloudStack 4.23.0.0, first release
