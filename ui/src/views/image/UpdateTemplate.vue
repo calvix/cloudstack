@@ -376,10 +376,6 @@ export default {
           id: 'virtio',
           description: 'virtio'
         })
-        controller.push({
-          id: 'virtio-blk',
-          description: 'virtio-blk'
-        })
       } else if (hyperVisor === 'VMware') {
         controller.push({
           id: '',
