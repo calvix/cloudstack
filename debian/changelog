@@ -1,3 +1,24 @@
+cloudstack (4.23.0.0-mdc3.0.0) unstable; urgency=low
+
+  * MDC release cs-4.23.0.0+mdc-3.0.0 on Apache CloudStack 4.23.0.0, first release
+    from mdc/production. Carries:
+    - kvm: Ceph-native LUKS2 encryption for RBD volumes (librbd), backport of #13556
+    - kvm: fix RBD exclusive-lock leak that breaks revertSnapshot on Ceph
+    - maintenance: hand agents to another management server without losing commands
+    - kvm: fill the template's holes before taking its LUKS clone snapshot
+    - vr: release DHCP leases of expunged VMs on redundant routers
+    - backup: keep the scheduler running when a schedule's async job is gone
+    - backup: reattach restored data disks at their backed-up device id
+    - kvm: add a disk.discard VM detail and drop the virtio-blk disk controller
+    - kvm: give virtual router NICs one queue per vCPU
+    - vpc: release public IPs held by VPC firewall rules when their network goes
+    - vpc: let users set the public interface rate of a VPC, applied live
+    - vpc: keep a public IP that other networks still use when its network goes
+    - cks: set the CSI driver's volume attach limit from a zone setting
+    - kvm: do not suppress ARP/ND on EVPN VXLAN bridge ports
+
+ -- calvix <7136358+calvix@users.noreply.github.com>  Thu, 12 Nov 2026 10:05:55 +0100
+
 cloudstack (4.23.0.0) unstable; urgency=low
 
   * Update the version to 4.23.0.0
