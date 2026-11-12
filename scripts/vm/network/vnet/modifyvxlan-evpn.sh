@@ -82,9 +82,14 @@ addVxlan() {
     bridge link show|grep ${VXLAN_BR}|awk '{print $2}'|grep "^${VXLAN_DEV}\$" > /dev/null
     if [[ $? -gt 0 ]]; then
         ip link set ${VXLAN_DEV} master ${VXLAN_BR}
-        bridge link set dev ${VXLAN_DEV} neigh_suppress on
         bridge link set dev ${VXLAN_DEV} learning off
     fi
+
+    # No ARP/ND suppression: the bridge never floods a gratuitous ARP to a neigh_suppress port, so
+    # after a redundant VR failover (or any VIP move inside a guest network) Instances on other
+    # hosts keep the old MAC until their neighbour entry expires (~30-40 s). Set on every add so
+    # devices created by an earlier version of this script are corrected as well.
+    bridge link set dev ${VXLAN_DEV} neigh_suppress off
 }
 
 deleteVxlan() {
