@@ -1803,6 +1803,10 @@ public class LibvirtVMDef {
             return _linkStateUp;
         }
 
+        public Integer getMultiQueueNumber() {
+            return _multiQueueNumber;
+        }
+
         public String getDpdkSourcePort() {
             return _dpdkSourcePort;
         }

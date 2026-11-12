@@ -322,6 +322,100 @@ public class LibvirtComputingResourceTest {
         LibvirtComputingResource.LOGGER = loggerMock;
     }
 
+    private InterfaceDef virtioNic() {
+        final InterfaceDef nic = new InterfaceDef();
+        nic.defBridgeNet("br0", null, "02:00:00:00:00:01", InterfaceDef.NicModel.VIRTIO);
+        return nic;
+    }
+
+    @Test
+    public void routerNicGetsOneQueuePerVcpu() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertEquals(Integer.valueOf(4), nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void userVmNicKeepsItsQueueSetting() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.User, 4, nic);
+        assertNull(nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void routerNicQueueCountFromDetailsWins() {
+        final InterfaceDef nic = virtioNic();
+        nic.setMultiQueueNumber(2);
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertEquals(Integer.valueOf(2), nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void routerNicUntouchedWhenSwitchedOff() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.routerNicMultiqueueEnabled = false;
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertNull(nic.getMultiQueueNumber());
+    }
+
+    @Test
+    public void routerNicKeepsTheSplitVirtqueueRing() {
+        // the kernel's vhost-net offers no packed ring, so asking for one gains nothing
+        LibvirtVMDef.setGlobalLibvirtVersion(12_000_000L);
+        LibvirtVMDef.setGlobalQemuVersion(10_002_001L);
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 4, nic);
+        assertFalse(nic.toString().contains("packed"));
+    }
+
+    private Domain domainToPlugANicInto(PlugNicCommand command, NicTO nic, InterfaceDef interfaceDef) throws Exception {
+        final LibvirtUtilitiesHelper libvirtUtilitiesHelper = Mockito.mock(LibvirtUtilitiesHelper.class);
+        final Connect conn = Mockito.mock(Connect.class);
+        final Domain vm = Mockito.mock(Domain.class);
+        final VifDriver vifDriver = Mockito.mock(VifDriver.class);
+        when(libvirtComputingResourceMock.getLibvirtUtilitiesHelper()).thenReturn(libvirtUtilitiesHelper);
+        when(libvirtUtilitiesHelper.getConnectionByVmName(command.getVmName())).thenReturn(conn);
+        when(libvirtComputingResourceMock.getDomain(conn, command.getVmName())).thenReturn(vm);
+        when(libvirtComputingResourceMock.getInterfaces(conn, command.getVmName())).thenReturn(new ArrayList<>());
+        when(nic.getName()).thenReturn("br0");
+        when(libvirtComputingResourceMock.getVifDriver(nic.getType(), nic.getName())).thenReturn(vifDriver);
+        when(vifDriver.plug(nic, "Other PV", "", null)).thenReturn(interfaceDef);
+        return vm;
+    }
+
+    @Test
+    public void plugNicGivesARouterNicOneQueuePerVcpu() throws Exception {
+        final NicTO nic = Mockito.mock(NicTO.class);
+        final InterfaceDef interfaceDef = Mockito.mock(InterfaceDef.class);
+        final PlugNicCommand command = new PlugNicCommand(nic, "r-50-VM", Type.DomainRouter);
+        final Domain vm = domainToPlugANicInto(command, nic, interfaceDef);
+        final DomainInfo domainInfo = new DomainInfo();
+        domainInfo.nrVirtCpu = 4;
+        when(vm.getInfo()).thenReturn(domainInfo);
+
+        assertTrue(LibvirtRequestWrapper.getInstance().execute(command, libvirtComputingResourceMock).getResult());
+
+        verify(libvirtComputingResourceMock).setRouterNicQueueSettings(Type.DomainRouter, 4, interfaceDef);
+    }
+
+    @Test
+    public void plugNicOfAUserVmDoesNotReadItsVcpuCount() throws Exception {
+        final NicTO nic = Mockito.mock(NicTO.class);
+        final PlugNicCommand command = new PlugNicCommand(nic, "i-2-50-VM", Type.User);
+        final Domain vm = domainToPlugANicInto(command, nic, Mockito.mock(InterfaceDef.class));
+
+        assertTrue(LibvirtRequestWrapper.getInstance().execute(command, libvirtComputingResourceMock).getResult());
+
+        verify(vm, never()).getInfo();
+    }
+
+    @Test
+    public void singleVcpuRouterNicStaysSingleQueue() {
+        final InterfaceDef nic = virtioNic();
+        libvirtComputingResourceSpy.setRouterNicQueueSettings(VirtualMachine.Type.DomainRouter, 1, nic);
+        assertNull(nic.getMultiQueueNumber());
+    }
+
     /**
      This test tests if the Agent can handle a vmSpec coming
      from a <=4.1 management server.

@@ -29,12 +29,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.libvirt.Connect;
+import org.libvirt.DomainInfo;
 import org.libvirt.Domain;
 import org.libvirt.LibvirtException;
+import org.mockito.ArgumentCaptor;
 import org.mockito.BDDMockito;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -302,6 +305,25 @@ public class LibvirtReplugNicCommandWrapperTest {
         verify(_domain).detachDevice(expectedDetachXml);
         verify(_domain).attachDevice(expectedAttachXml);
         verify(_domain).updateDeviceFlags(expectedUpdateXml, LibvirtReplugNicCommandWrapper.DomainAffect.LIVE.getValue());
+    }
+
+    @Test
+    public void replugOfARouterNicKeepsOneQueuePerVcpu() throws LibvirtException {
+        final DomainInfo domainInfo = new DomainInfo();
+        domainInfo.nrVirtCpu = 4;
+        when(_domain.getInfo()).thenReturn(domainInfo);
+        final NicTO nic = new NicTO();
+        nic.setType(Networks.TrafficType.Guest);
+        nic.setName(GUEST_BR);
+        nic.setBroadcastType(Networks.BroadcastDomainType.Vlan);
+        nic.setMac("02:00:7c:98:00:02");
+        nic.setBroadcastUri(Networks.BroadcastDomainType.Vlan.toUri(100));
+
+        new LibvirtReplugNicCommandWrapper().execute(new ReplugNicCommand(nic, "r-85-VM", VirtualMachine.Type.DomainRouter), res);
+
+        final ArgumentCaptor<String> attachedXml = ArgumentCaptor.forClass(String.class);
+        verify(_domain).attachDevice(attachedXml.capture());
+        Assert.assertTrue(attachedXml.getValue(), attachedXml.getValue().contains("queues='4'"));
     }
 
 }

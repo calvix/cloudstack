@@ -21,6 +21,7 @@ import java.util.List;
 
 import org.libvirt.Connect;
 import org.libvirt.Domain;
+import org.libvirt.DomainInfo;
 import org.libvirt.LibvirtException;
 
 import com.cloud.agent.api.Answer;
@@ -33,6 +34,7 @@ import com.cloud.hypervisor.kvm.resource.LibvirtVMDef.InterfaceDef;
 import com.cloud.hypervisor.kvm.resource.VifDriver;
 import com.cloud.resource.CommandWrapper;
 import com.cloud.resource.ResourceWrapper;
+import com.cloud.vm.VirtualMachine;
 
 @ResourceWrapper(handles =  ReplugNicCommand.class)
 public final class LibvirtReplugNicCommandWrapper extends CommandWrapper<ReplugNicCommand, Answer, LibvirtComputingResource> {
@@ -66,6 +68,10 @@ public final class LibvirtReplugNicCommandWrapper extends CommandWrapper<ReplugN
             final InterfaceDef interfaceDef = newVifDriver.plug(nic, "Other PV", oldPluggedNic.getModel().toString(), null);
             if (command.getDetails() != null) {
                 libvirtComputingResource.setInterfaceDefQueueSettings(command.getDetails(), null, interfaceDef);
+            }
+            if (command.getVMType() == VirtualMachine.Type.DomainRouter) {
+                final DomainInfo domainInfo = vm.getInfo();
+                libvirtComputingResource.setRouterNicQueueSettings(command.getVMType(), domainInfo == null ? null : domainInfo.nrVirtCpu, interfaceDef);
             }
             interfaceDef.setSlot(oldPluggedNic.getSlot());
             interfaceDef.setDevName(oldPluggedNic.getDevName());

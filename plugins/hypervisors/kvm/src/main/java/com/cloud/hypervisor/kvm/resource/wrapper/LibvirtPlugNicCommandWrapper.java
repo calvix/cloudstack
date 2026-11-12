@@ -32,6 +32,7 @@ import com.cloud.resource.ResourceWrapper;
 import com.cloud.vm.VirtualMachine;
 import org.libvirt.Connect;
 import org.libvirt.Domain;
+import org.libvirt.DomainInfo;
 import org.libvirt.LibvirtException;
 
 import java.util.List;
@@ -64,6 +65,10 @@ public final class LibvirtPlugNicCommandWrapper extends CommandWrapper<PlugNicCo
             final InterfaceDef interfaceDef = vifDriver.plug(nic, "Other PV", "", null);
             if (command.getDetails() != null) {
                 libvirtComputingResource.setInterfaceDefQueueSettings(command.getDetails(), null, interfaceDef);
+            }
+            if (vmType == VirtualMachine.Type.DomainRouter) {
+                final DomainInfo domainInfo = vm.getInfo();
+                libvirtComputingResource.setRouterNicQueueSettings(vmType, domainInfo == null ? null : domainInfo.nrVirtCpu, interfaceDef);
             }
             vm.attachDevice(interfaceDef.toString());
 
