@@ -10141,7 +10141,10 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 expunge(vmVO);
                 logger.debug("Successfully cleaned up Instance {} after create Instance from backup failed", vmId);
             } catch (Exception cleanupException) {
-                logger.debug("Failed to cleanup Instance {} after create Instance from backup failed", vmId, cleanupException);
+                // Not debug: the Instance is left with whatever its disks held before the restore, and it looks like
+                // the result of a restore to anyone who finds it.
+                logger.warn("Failed to cleanup Instance {} after create Instance from backup failed; it remains, "
+                        + "and its volumes may hold none of the backup's data", vmId, cleanupException);
             }
             throw e;
         }
