@@ -93,6 +93,9 @@ import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
+import com.cloud.host.HostVO;
+import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.dao.HypervisorCapabilitiesDao;
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
@@ -224,6 +227,10 @@ public class KubernetesClusterActionWorker {
     protected AffinityGroupVMMapDao affinityGroupVMMapDao;
     @Inject
     protected VMInstanceDao vmInstanceDao;
+    @Inject
+    protected HostDao hostDao;
+    @Inject
+    protected HypervisorCapabilitiesDao hypervisorCapabilitiesDao;
 
     protected KubernetesClusterDao kubernetesClusterDao;
     protected KubernetesClusterVmMapDao kubernetesClusterVmMapDao;
@@ -842,6 +849,78 @@ public class KubernetesClusterActionWorker {
         }
     }
 
+    /** The highest --volume-attach-limit the CloudStack CSI driver accepts. */
+    static final int CSI_MAX_VOLUME_ATTACH_LIMIT = 256;
+
+    /**
+     * The --volume-attach-limit for the CSI driver's node plugin: how many volumes Kubernetes may place on one node.
+     * Without it the driver reports 256, more than a KVM node VM can attach, so the scheduler keeps placing pods on
+     * a full node and their volumes never attach.
+     *
+     * @param configured the zone's {@link KubernetesClusterService#KubernetesClusterCsiVolumeAttachLimit}; 0 means auto
+     * @param maxDataVolumes the max data volumes limit of the nodes' hypervisor, or null if unknown
+     */
+    protected int resolveCsiVolumeAttachLimit(int configured, Integer maxDataVolumes) {
+        boolean knownMax = maxDataVolumes != null && maxDataVolumes > 0;
+        if (configured <= 0) {
+            if (configured < 0) {
+                logger.warn("Ignoring negative {} {} for Kubernetes cluster {}, using the hypervisor's limit",
+                        KubernetesClusterService.KubernetesClusterCsiVolumeAttachLimit.key(), configured, kubernetesCluster.getName());
+            }
+            return knownMax ? Math.min(maxDataVolumes, CSI_MAX_VOLUME_ATTACH_LIMIT) : CSI_MAX_VOLUME_ATTACH_LIMIT;
+        }
+        int limit = Math.min(configured, CSI_MAX_VOLUME_ATTACH_LIMIT);
+        if (configured > CSI_MAX_VOLUME_ATTACH_LIMIT) {
+            logger.warn("{} {} is above the CSI driver's maximum, using {} for Kubernetes cluster {}",
+                    KubernetesClusterService.KubernetesClusterCsiVolumeAttachLimit.key(), configured, limit, kubernetesCluster.getName());
+        }
+        if (knownMax && limit > maxDataVolumes) {
+            logger.warn("CSI volume attach limit {} for Kubernetes cluster {} is above the hypervisor's max data volumes limit {}: " +
+                    "volumes above that will fail to attach", limit, kubernetesCluster.getName(), maxDataVolumes);
+        }
+        return limit;
+    }
+
+    /**
+     * The lowest max data volumes limit of the hypervisors the cluster's VMs run on (as checked when a volume is
+     * attached), or null if it cannot be found.
+     */
+    protected Integer getNodesMaxDataVolumesLimit() {
+        Integer lowest = null;
+        for (KubernetesClusterVmMapVO vmMap : kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId())) {
+            VMInstanceVO vm = vmInstanceDao.findById(vmMap.getVmId());
+            if (vm == null) {
+                continue;
+            }
+            Long hostId = vm.getHostId() != null ? vm.getHostId() : vm.getLastHostId();
+            HostVO host = hostId == null ? null : hostDao.findById(hostId);
+            if (host == null) {
+                continue;
+            }
+            hostDao.loadDetails(host);
+            String hypervisorVersion = host.getDetail("product_version");
+            if (StringUtils.isBlank(hypervisorVersion)) {
+                hypervisorVersion = host.getHypervisorVersion();
+            }
+            Integer limit;
+            try {
+                limit = hypervisorCapabilitiesDao.getMaxDataVolumesLimit(host.getHypervisorType(), hypervisorVersion);
+            } catch (RuntimeException e) {
+                logger.debug("No hypervisor capabilities for {} {}: {}", host.getHypervisorType(), hypervisorVersion, e.getMessage());
+                continue;
+            }
+            if (limit != null && limit > 0 && (lowest == null || limit < lowest)) {
+                lowest = limit;
+            }
+        }
+        return lowest;
+    }
+
+    protected int getCsiVolumeAttachLimit() {
+        Integer configured = KubernetesClusterService.KubernetesClusterCsiVolumeAttachLimit.valueIn(kubernetesCluster.getZoneId());
+        return resolveCsiVolumeAttachLimit(configured == null ? 0 : configured, getNodesMaxDataVolumesLimit());
+    }
+
     protected boolean deployCsiDriver() {
         File pkFile = getManagementServerSshPublicKeyFile();
         Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
@@ -849,7 +928,9 @@ public class KubernetesClusterActionWorker {
         sshPort = publicIpSshPort.second();
 
         try {
-            String command = String.format("sudo %s/%s", scriptPath, deployCsiDriverScriptFilename);
+            int volumeAttachLimit = getCsiVolumeAttachLimit();
+            logger.info("Deploying the CSI driver on Kubernetes cluster {} with volume attach limit {}", kubernetesCluster.getName(), volumeAttachLimit);
+            String command = String.format("sudo %s/%s %d", scriptPath, deployCsiDriverScriptFilename, volumeAttachLimit);
             Pair<Boolean, String> result = SshHelper.sshExecute(publicIpAddress, sshPort, getControlNodeLoginUser(),
                     pkFile, null, command, 10000, 10000, 60000);
 

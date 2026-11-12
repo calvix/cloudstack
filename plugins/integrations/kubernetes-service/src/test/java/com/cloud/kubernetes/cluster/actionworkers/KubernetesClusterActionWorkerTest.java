@@ -33,9 +33,14 @@ import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import com.cloud.host.HostVO;
+import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.Hypervisor;
+import com.cloud.hypervisor.dao.HypervisorCapabilitiesDao;
 import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
+import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
@@ -46,6 +51,8 @@ import com.cloud.network.IpAddress;
 import com.cloud.network.Network;
 import com.cloud.network.dao.IPAddressDao;
 import com.cloud.network.dao.IPAddressVO;
+import com.cloud.vm.VMInstanceVO;
+import com.cloud.vm.dao.VMInstanceDao;
 
 @RunWith(MockitoJUnitRunner.class)
 public class KubernetesClusterActionWorkerTest {
@@ -74,6 +81,15 @@ public class KubernetesClusterActionWorkerTest {
     @Mock
     AffinityGroupDao affinityGroupDao;
 
+    @Mock
+    VMInstanceDao vmInstanceDao;
+
+    @Mock
+    HostDao hostDao;
+
+    @Mock
+    HypervisorCapabilitiesDao hypervisorCapabilitiesDao;
+
     KubernetesClusterActionWorker actionWorker = null;
 
     final static Long DEFAULT_ID = 1L;
@@ -90,6 +106,79 @@ public class KubernetesClusterActionWorkerTest {
         actionWorker = new KubernetesClusterActionWorker(kubernetesCluster, kubernetesClusterManager);
         actionWorker.ipAddressDao = ipAddressDao;
         actionWorker.affinityGroupDao = affinityGroupDao;
+        actionWorker.vmInstanceDao = vmInstanceDao;
+        actionWorker.hostDao = hostDao;
+        actionWorker.hypervisorCapabilitiesDao = hypervisorCapabilitiesDao;
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitAutoUsesHypervisorLimit() {
+        Assert.assertEquals(22, actionWorker.resolveCsiVolumeAttachLimit(0, 22));
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitAutoCapsAtDriverMaximum() {
+        Assert.assertEquals(256, actionWorker.resolveCsiVolumeAttachLimit(0, 1000));
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitAutoWithoutHypervisorLimitKeepsDriverDefault() {
+        Assert.assertEquals(256, actionWorker.resolveCsiVolumeAttachLimit(0, null));
+        Assert.assertEquals(256, actionWorker.resolveCsiVolumeAttachLimit(0, 0));
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitNegativeMeansAuto() {
+        Assert.assertEquals(22, actionWorker.resolveCsiVolumeAttachLimit(-1, 22));
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitConfiguredValueWins() {
+        Assert.assertEquals(16, actionWorker.resolveCsiVolumeAttachLimit(16, 22));
+        // above the hypervisor's limit: only warned about, the admin may know better (e.g. a SCSI node template)
+        Assert.assertEquals(64, actionWorker.resolveCsiVolumeAttachLimit(64, 22));
+    }
+
+    @Test
+    public void resolveCsiVolumeAttachLimitConfiguredValueCappedAtDriverMaximum() {
+        Assert.assertEquals(256, actionWorker.resolveCsiVolumeAttachLimit(300, null));
+    }
+
+    private void mockClusterVm(long vmId, Long hostId, Long lastHostId, Integer maxDataVolumes) {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vm.getHostId()).thenReturn(hostId);
+        Mockito.lenient().when(vm.getLastHostId()).thenReturn(lastHostId);
+        Mockito.when(vmInstanceDao.findById(vmId)).thenReturn(vm);
+        long usedHostId = hostId != null ? hostId : lastHostId;
+        HostVO host = Mockito.mock(HostVO.class);
+        Mockito.when(host.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.KVM);
+        Mockito.when(host.getDetail("product_version")).thenReturn(null);
+        Mockito.when(host.getHypervisorVersion()).thenReturn("10.0.0-" + usedHostId);
+        Mockito.when(hostDao.findById(usedHostId)).thenReturn(host);
+        Mockito.when(hypervisorCapabilitiesDao.getMaxDataVolumesLimit(Hypervisor.HypervisorType.KVM, "10.0.0-" + usedHostId))
+                .thenReturn(maxDataVolumes);
+    }
+
+    @Test
+    public void getNodesMaxDataVolumesLimitTakesTheLowestOfTheNodes() {
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID)).thenReturn(List.of(
+                new KubernetesClusterVmMapVO(DEFAULT_ID, 11L, true),
+                new KubernetesClusterVmMapVO(DEFAULT_ID, 12L, false)));
+        mockClusterVm(11L, 101L, null, 32);
+        // a stopped node: its last host counts
+        mockClusterVm(12L, null, 102L, 22);
+
+        Assert.assertEquals(Integer.valueOf(22), actionWorker.getNodesMaxDataVolumesLimit());
+    }
+
+    @Test
+    public void getNodesMaxDataVolumesLimitIsNullWithoutHosts() {
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID)).thenReturn(List.of(
+                new KubernetesClusterVmMapVO(DEFAULT_ID, 11L, true)));
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vmInstanceDao.findById(11L)).thenReturn(vm);
+
+        Assert.assertNull(actionWorker.getNodesMaxDataVolumesLimit());
     }
 
     @Test

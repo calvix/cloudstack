@@ -143,6 +143,15 @@ public interface KubernetesClusterService extends PluggableService, Configurable
             "Start port for Port forwarding rules for etcd nodes",
             true,
             KubernetesServiceEnabled.key());
+    static final ConfigKey<Integer> KubernetesClusterCsiVolumeAttachLimit = new ConfigKey<Integer>("Advanced", Integer.class,
+            "cloud.kubernetes.cluster.csi.volume.attach.limit",
+            "0",
+            "Number of volumes the CloudStack CSI driver reports as attachable per node (its --volume-attach-limit, 1 to 256), " +
+                    "set when a Kubernetes cluster with the CSI driver is created. 0 uses the max data volumes limit of the " +
+                    "nodes' hypervisor (at most 256).",
+            true,
+            ConfigKey.Scope.Zone,
+            KubernetesServiceEnabled.key());
 
     KubernetesCluster findById(final Long id);
 
