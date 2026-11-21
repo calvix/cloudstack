@@ -1,3 +1,10 @@
+cloudstack (4.23.0.0-mdc3.2.0) unstable; urgency=low
+
+  * MDC release cs-4.23.0.0+mdc-3.2.0 on Apache CloudStack 4.23.0.0. Adds to 3.1.0:
+    - systemvm: scale router TCP memory and orphan limits with RAM
+
+ -- calvix <7136358+calvix@users.noreply.github.com>  Sat, 21 Nov 2026 20:12:39 +0100
+
 cloudstack (4.23.0.0-mdc3.1.0) unstable; urgency=low
 
   * MDC release cs-4.23.0.0+mdc-3.1.0 on Apache CloudStack 4.23.0.0. Adds to 3.0.0:
