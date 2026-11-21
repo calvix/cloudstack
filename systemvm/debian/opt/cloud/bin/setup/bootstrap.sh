@@ -100,6 +100,14 @@ config_sysctl() {
       sed  -i "/^vm.vfs_cache_pressure/ c\vm.vfs_cache_pressure = 100" /etc/sysctl.conf
   fi
 
+  # TCP memory and orphaned sockets scale with RAM, since the same file is used by routers
+  # from 512 MB up. tcp_mem is twice the kernel's own default (tcp_init_mem: limit = pages/16,
+  # then limit*3/4, limit, limit*3/2), so the maximum is 3/16 of RAM; 16 orphans per MB.
+  local pages=$((physmem * 1024 / $(getconf PAGESIZE)))
+  local limit=$((pages / 16))
+  sed -i "/^net.ipv4.tcp_mem/ c\net.ipv4.tcp_mem = $((limit * 3 / 2)) $((limit * 2)) $((limit * 3))" /etc/sysctl.conf
+  sed -i "/^net.ipv4.tcp_max_orphans/ c\net.ipv4.tcp_max_orphans = $((physmem / 1024 * 16))" /etc/sysctl.conf
+
   sync
   sysctl -p
 }
